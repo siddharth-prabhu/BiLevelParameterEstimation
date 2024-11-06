@@ -1,7 +1,8 @@
 import os
-from functools import partial
+from functools import partial, reduce
 from typing import List, Tuple
 import operator
+import itertools
 
 import jax
 import jax.numpy as jnp
@@ -80,13 +81,14 @@ def _data_matrix(p, features, T):
 def equality_constraints(p, theta, nx):
     # The equality constraints can itself be nonlinear but given p, they should be linear with respect to theta.
     # flattened inputs. Reshape theta and then specify constraints for simplicity
-    # Right now can only add constraints with respect to p and theta for the terms that are present in the original model
+    # Can only add constraints with respect to p and theta for the terms that are present in the original model
     # TODO add args i.e. temperature and other variables
     theta = theta.reshape(nx, -1)
     return jnp.array([
         theta[0, 1] + theta[1, 1],
         theta[0, 4] + theta[1, 4],
-        theta[2, 2] + theta[3, 2]
+        theta[2, 2] + theta[3, 2], 
+        # theta[0, 2] - 4 # spurious constraints (cannot add)
     ])
 
 @partial(jax.custom_vjp, nondiff_argnums = (6, 7))
@@ -190,33 +192,59 @@ def _optimal_parameters_bwd(nonzero_cols, regularization, res, g_dot):
 
 _optimal_parameters.defvjp(_optimal_parameters_fwd, _optimal_parameters_bwd)
 
+degree = 2
 
 def poly(x, t):
+    """
+    return jnp.concatenate([
+        jnp.array([*map(lambda _x : reduce(operator.mul, _x), itertools.combinations_with_replacement(x, i))]) for i in range(1, degree + 1)
+    ])"""
     return jnp.array([
         x[0], x[1], x[2], x[3], 
+        
         x[0]**2, x[0]*x[1], x[0]*x[2], x[0]*x[3], 
         x[1]**2, x[1]*x[2], x[1]*x[3],
         x[2]**2, x[2]*x[3],
         x[3]**2,
+        
         # x[0]**3, x[0]**2*x[1], x[0]**2*x[2], x[0]**2*x[3],
         # x[1]**3, x[1]**2*x[0], x[1]**2*x[2], x[1]**2*x[3],
         # x[2]**3, x[2]**2*x[0], x[2]**2*x[1], x[2]**2*x[3],
         # x[3]**3, x[3]**2*x[0], x[3]**2*x[1], x[3]**2*x[2],
-        # x[0]*x[1]*x[2], x[0]*x[1]*x[3], x[1]*x[2]*x[3], x[0]*x[2]*x[3]
+        # x[0]*x[1]*x[2], x[0]*x[1]*x[3], x[1]*x[2]*x[3], x[0]*x[2]*x[3], 
+
+        # x[0]**4, x[0]**3*x[1], x[0]**3*x[2], x[0]**3*x[3], 
+        # x[0]**2*x[1]**2, x[0]**2*x[1]*x[2], x[0]**2*x[1]*x[3], x[0]**2*x[2]**2, x[0]**2*x[2]*x[3], x[0]**2*x[3]**2,
+        # x[0]*x[1]**3, x[0]*x[1]**2*x[2], x[0]*x[1]**2*x[3], x[0]*x[1]*x[2]**2, x[0]*x[1]*x[2]*x[3], x[0]*x[1]*x[3]**2, x[0]*x[2]**3,
+        # x[0]*x[2]**2*x[3], x[0]*x[2]*x[3]**2, x[0]*x[3]**3, x[1]**4, x[1]**3*x[2], x[1]**3*x[3], x[1]**2*x[2]**2, x[1]**2*x[2]*x[3], 
+        # x[1]**2*x[3]**2, x[1]*x[2]**3, x[1]*x[2]**2*x[3], x[1]*x[2]*x[3]**2, x[1]*x[3]**3, x[2]**4, x[2]**3*x[3], x[2]**2*x[3]**2, x[2]*x[3]**3, x[3]**4
+        
     ])
 
 def poly_interp(z, t, x):
+    """
+    return jnp.concatenate([
+        jnp.array([*map(lambda _x : reduce(lambda accum, value : accum * value(t), _x, 1.), itertools.combinations_with_replacement(x, i))]) for i in range(1, degree + 1)
+    ])"""
     return jnp.array([
         x[0](t), x[1](t), x[2](t), x[3](t), 
+
         x[0](t)**2, x[0](t)*x[1](t), x[0](t)*x[2](t), x[0](t)*x[3](t), 
         x[1](t)**2, x[1](t)*x[2](t), x[1](t)*x[3](t),
         x[2](t)**2, x[2](t)*x[3](t),
         x[3](t)**2,
+        
         # x[0](t)**3, x[0](t)**2*x[1](t), x[0](t)**2*x[2](t), x[0](t)**2*x[3](t),
         # x[1](t)**3, x[1](t)**2*x[0](t), x[1](t)**2*x[2](t), x[1](t)**2*x[3](t),
         # x[2](t)**3, x[2](t)**2*x[0](t), x[2](t)**2*x[1](t), x[2](t)**2*x[3](t),
         # x[3](t)**3, x[3](t)**2*x[0](t), x[3](t)**2*x[1](t), x[3](t)**2*x[2](t),
-        # x[0](t)*x[1](t)*x[2](t), x[0](t)*x[1](t)*x[3](t), x[1](t)*x[2](t)*x[3](t), x[0](t)*x[2](t)*x[3](t)
+        # x[0](t)*x[1](t)*x[2](t), x[0](t)*x[1](t)*x[3](t), x[1](t)*x[2](t)*x[3](t), x[0](t)*x[2](t)*x[3](t),
+
+        # x[0](t)**4, x[0](t)**3*x[1](t), x[0](t)**3*x[2](t), x[0](t)**3*x[3](t), 
+        # x[0](t)**2*x[1](t)**2, x[0](t)**2*x[1](t)*x[2](t), x[0](t)**2*x[1](t)*x[3](t), x[0](t)**2*x[2](t)**2, x[0](t)**2*x[2](t)*x[3](t), x[0](t)**2*x[3](t)**2,
+        # x[0](t)*x[1](t)**3, x[0](t)*x[1](t)**2*x[2](t), x[0](t)*x[1](t)**2*x[3](t), x[0](t)*x[1](t)*x[2](t)**2, x[0](t)*x[1](t)*x[2](t)*x[3](t), x[0](t)*x[1](t)*x[3](t)**2, x[0](t)*x[2](t)**3,
+        # x[0](t)*x[2](t)**2*x[3](t), x[0](t)*x[2](t)*x[3](t)**2, x[0](t)*x[3](t)**3, x[1](t)**4, x[1](t)**3*x[2](t), x[1](t)**3*x[3](t), x[1](t)**2*x[2](t)**2, x[1](t)**2*x[2](t)*x[3](t), 
+        # x[1](t)**2*x[3](t)**2, x[1](t)*x[2](t)**3, x[1](t)*x[2](t)**2*x[3](t), x[1](t)*x[2](t)*x[3](t)**2, x[1](t)*x[3](t)**3, x[2](t)**4, x[2](t)**3*x[3](t), x[2](t)**2*x[3](t)**2, x[2](t)*x[3](t)**3, x[3](t)**4
     ])
 
 def _foo(x, t, T, theta, p):
@@ -377,3 +405,84 @@ sequential_object = minimize_ipopt(
 
 print(sequential_object)
 """
+
+# compare with nonlinear optimization on derivatives
+
+def derivative_objective(p, state_derivatives, states, mask, regularization = 0.01):
+    # states shape = (E, T, n) # no of experiments X time points X states 
+    # derivatives shape = (E, T, n) # no of experiments X time points X states 
+    # features shape = (E, T, F) # no of experiments X time points X no of features
+    # p shape = (F) # no of features
+
+    theta = p[: -len_features].reshape(nx, -1)
+    theta = theta * mask
+    p = p[-len_features :]
+    
+    solution = jax.vmap(lambda xi, ti : jax.vmap(lambda _xi : _foo(_xi, 0., ti, theta, p))(xi))(states, temperature)
+    _loss = jax.vmap(lambda pred, meas : jnp.mean((pred - meas)**2))(solution, state_derivatives)
+    return jnp.mean(_loss) + regularization * jnp.linalg.norm(theta), theta
+
+p_guess = jnp.ones((nx + 1)*len_features)
+mask = jnp.array([
+    1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+    1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+    0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+    0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+]).reshape(nx, -1)
+derivative_loss = derivative_objective(p_guess, estimated_derivatives, solution, mask)
+
+
+def outer_derivative_objective(p_guess, solution, estimated_derivatives, thresholding = 0.1, maxiter = 10):
+    # implement sequential threshold least square algorithm
+    # TODO previous subproblems can have lower tolerance or less maximum iterations to eliminate the terms. How to choose initial tolerance ?
+    # TODO how to eliminate coefficients that have equality constraints dependant on others coefficients that are kept
+    # eg : constraint x1 + x2 = 0. If x1 has to be kept and x2 is neglected then how to remove x2 if the constraint forces x2 to be -x1
+
+    def get_mask(theta) -> jnp.ndarray :
+
+        _theta = theta.reshape(-1)
+        ind = jnp.arange(len(_theta), dtype = int)
+        big_ind = jnp.abs(_theta) >= thresholding
+        mask = jnp.zeros_like(_theta, dtype = int) # used to stop iterations
+        mask = mask.at[ind[big_ind]].set(1)
+        
+        return mask.reshape(*theta.shape)
+
+    iteration = 0
+    theta = p_guess[: -len_features].reshape(nx, -1)
+
+    while iteration < maxiter : 
+
+        mask = get_mask(theta)
+        print(f"Iteration {iteration}, linear parameters {theta}")
+        
+        if iteration == 0 : prev_mask = mask
+        if iteration > 0 and jnp.allclose(mask, prev_mask) : 
+            print("Optimal solution found")
+            break
+        
+        _simple_obj = jax.jit(lambda p : derivative_objective(p, estimated_derivatives, solution, mask)[0])
+        _simple_jac = jax.jit(jax.grad(_simple_obj))
+        _simple_hess = jax.jit(jax.jacrev(_simple_jac))
+
+        print("Starting optimization")
+        solution_object = minimize_ipopt(
+            _simple_obj, 
+            x0 = p_guess, 
+            jac = _simple_jac,
+            hess = _simple_hess,  
+            tol = 1e-7, 
+            options = {"maxiter" : 100, "print_level" : 5}
+            )
+        
+        print(solution_object)
+        p = jnp.array(solution_object.x)
+        loss, theta = derivative_objective(p, estimated_derivatives, solution, mask)
+        print(f"Iteration {iteration} : loss {loss}")
+
+        prev_mask = mask
+        iteration += 1
+
+    return solution_object
+
+# solution_object = outer_derivative_objective(p_guess, solution, estimated_derivatives, thresholding = 0.1, maxiter = 20)
