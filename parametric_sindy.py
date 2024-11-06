@@ -126,12 +126,13 @@ def _optimal_parameters(p, target, features, temperature, permute, inverse_permu
     x_hat, inverses = jnp.stack([_theta for _theta, _ in _theta_and_inv]), jnp.stack([_inv for _, _inv in _theta_and_inv]) # unconstrained solution and pseudo inverses.
 
     # calculate the constraints part 
-    # g_x.T @ (g_x @ (A.T @ A)-1 g_x.T)-1 @ (g - g_x @ x + g_x @ x_hat)
+    # lambda(optimal) = (g_x @ (A.T @ A)-1 g_x.T)-1 @ (g - g_x @ x + g_x @ x_hat)
     lam_star = jnp.linalg.solve(
         jnp.sum(jax.vmap(lambda _g_x, _inv : _g_x @ _inv @ _g_x.T)(jnp.stack(jnp.array_split(g_x, nx, axis = 1)), inverses), axis = 0), 
         g - g_x @ theta_guess + g_x @ x_hat.flatten()
     )
 
+    # x(optimal) = x_hat - A-1 @ g_x.T @ lambda(optimal)
     x_star = jax.vmap(lambda _x_hat, _inv, _con : _x_hat - _inv @ _con)(x_hat, inverses, jnp.stack(jnp.array_split(g_x.T @ lam_star, nx)))
     return x_star, (lam_star, inverses)
 
@@ -261,15 +262,9 @@ def simple_objective(p, states, features, derivatives, permute, inverse_permute,
     # cannot scan over the list nonzero_cols either.
     # unrolling the loop is the only option
 
-    # TODO get theta from an optimization problem. Equality constraint convex problem
-    """
-    theta = jnp.vstack(
-        jax.tree_util.tree_map(
-            lambda deri_iter, perm_iter, inv_perm_iter, cols_iter : _optimal_parameters(p, deri_iter, features, temperature, perm_iter, inv_perm_iter, cols_iter, regularization)[0], 
-            [*jnp.vstack(derivatives).T], [*permute], [*inverse_permute], [*nonzero_cols]
-        )
-    )"""
-
+    # TODO outer optimization problem can be a DF-SINDy problem or a sequential/simultaneous optimization problem
+    # TODO add a stoichiometric matrix M. For most cases when M is identity, for which things can be done most efficiently
+    
     theta, _ = _optimal_parameters(p, jnp.vstack(derivatives).T, features, temperature, permute, inverse_permute, nonzero_cols, regularization)
 
     solution = jax.vmap(lambda xi, ti : odeint(_foo, xi, time_span, ti, theta, p))(xinit, temperature)
@@ -311,7 +306,8 @@ print("gradients autodiff", gradients)
 def outer_objective(p_guess, theta_guess, solution, features, estimated_derivatives, thresholding = 0.1, maxiter = 10):
     # implement sequential threshold least square algorithm
     # TODO previous subproblems can have lower tolerance or less maximum iterations to eliminate the terms. How to choose initial tolerance ?
-    # TODO how to eliminate coefficients that have equality constraints dependant on others coefficients that are kept
+    # Note : equality constraints are only based on coefficients which are kept
+    # TODO : add equality constraints to the outer objective function dependent on E
     # eg : constraint x1 + x2 = 0. If x1 has to be kept and x2 is neglected then how to remove x2 if the constraint forces x2 to be -x1
 
     def get_permutations(theta) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, List[jnp.ndarray]]:
