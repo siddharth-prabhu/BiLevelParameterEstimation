@@ -1,1 +1,9 @@
+__pycache__
+
+*.png
 rough*
+*.txt
+!requirements.txt
+*.out
+*.sh
+log/
