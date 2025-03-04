@@ -1,8 +1,4 @@
 import os
-from functools import partial, reduce
-from typing import List, Tuple
-import operator
-import itertools
 import logging
 from datetime import datetime
 from pprint import pformat
@@ -14,20 +10,17 @@ import jax.random as jrandom
 jax.config.update("jax_enable_x64", True)
 from jax.experimental.ode import odeint
 from jax import flatten_util, tree_util
-import diffrax
-import pysindy as ps
 
 import matplotlib.pyplot as plt
 from cyipopt import minimize_ipopt
-from scipy.integrate import odeint as scipy_odeint
 from scipy.interpolate import CubicSpline
 
-from utils import differentiable_regression, constraint_differentiable_regression
+from utils import differentiable_regression, odeint_diffrax, plot_coefficients, plot_trajectories
 
-# choose hyperparameters
+# Choose Hyperparameters
 parser = argparse.ArgumentParser("ParameterEstimationCalciumIon")
 parser.add_argument("--iters", type = int, default = 1000, help = "The maximum number of iterations to be performed in parameter estimation")
-parser.add_argument("--tol", type = int, default = 1e-4, help = "Ipopt tolerance")
+parser.add_argument("--tol", type = float, default = 1e-4, help = "Ipopt tolerance")
 parser.add_argument("--atol", type = float, default = 1e-8, help = "Absolute tolerance of ode solver")
 parser.add_argument("--rtol", type = float, default = 1e-6, help = "Relative tolerance of ode solver")
 parser.add_argument("--mxstep", type = int, default = 10_000, help = "The maximum number of steps a ode solver takes")
@@ -47,29 +40,8 @@ logger = logging.getLogger("__name__")
 logger.setLevel(logging.INFO)
 logfile = logging.FileHandler(os.path.join(_dir, "record.txt"))
 logger.addHandler(logfile)
-logger.info("PARAMETER ESTIMATION CALCIUM ION")
+logger.info("PARAMETER ESTIMATION (ODE) CALCIUM ION")
 logger.info(pformat(pargs.__dict__))
-
-
-def odeint_diffrax(afunc, rtol, atol, mxstep, xinit, time_span, parameters):
-    # This is done to prevent inf values when time_span is nonincreasing (or has the same values)
-    # eps = jnp.zeros_like(time_span)
-    # _time_span = time_span + eps.at[0].set(-1e-16)
-
-    _afunc = lambda t, x, p : afunc(x, t, p)
-    return diffrax.diffeqsolve(
-                diffrax.ODETerm(_afunc), 
-                diffrax.Tsit5(),
-                t0 = time_span[0], # make sure that initial conditions are at time_span[0]
-                t1 = time_span[-1],
-                dt0 = None, 
-                saveat = diffrax.SaveAt(ts = time_span), 
-                y0 = xinit, 
-                args = parameters,
-                stepsize_controller = diffrax.PIDController(rtol=rtol, atol=atol, pcoeff = 0.4, icoeff = 0.3, dcoeff = 0.), # pcoeff = 0.4, icoeff = 0.3, dcoeff = 0
-                adjoint = diffrax.DirectAdjoint(), 
-                max_steps = mxstep
-        ).ys
 
 
 def calcium_ion(x, t, p) -> jnp.ndarray :
@@ -92,7 +64,11 @@ def calcium_ion(x, t, p) -> jnp.ndarray :
 # Generate data
 nx = 4
 key = jrandom.PRNGKey(20)
-key_temp, key_xinit = jrandom.split(key, 2)
+param_labels = [
+    [r"$k_1$", r"$k_2$", r"$k_3$", r"$k_4$", r"$k_5$", r"$k_6$", r"$k_7$", r"$k_8$", r"$k_9$", r"$k_{10}$", r"$k_{11}$"], 
+    [r"$Km _1$", r"$Km _2$", r"$Km _3$", r"$Km _4$", r"$Km _5$", r"$Km _6$"]
+]
+
 xinit = jnp.array([0.12, 0.31, 0.0058, 4.3])
 time_span = jnp.arange(1, 20., 0.1)
 p_actual = jnp.array([0.09, 2, 1.27, 3.73, 1.27, 32.24, 2, 0.05, 13.58, 153, 4.85, 0.19, 0.73, 29.09, 2.67, 0.16, 0.05])
@@ -178,22 +154,22 @@ def _foo_interp(z, t, px):
 
 
 ###############################################################################################################################################
-# Comparing with DFSINDy shooting-interp (Full NLP)
+# Comparing with Full NLP : DFSINDy shooting + interpolation
 
 dfsindy_target = solution - solution[0]
 
 def simple_objective(px, target):
-    solution = odeint_diffrax(_foo_interp, pargs.rtol, pargs.atol, pargs.mxstep, xinit, time_span, unravel(px)) - xinit
+    solution = odeint_diffrax(_foo_interp, xinit, time_span, unravel(px), pargs.rtol, pargs.atol, pargs.mxstep) - xinit
     _loss = jnp.mean((solution - target)**2)
     return _loss
 
 def outer_objective(px_guess, target):
     
-    interp_logger = logging.getLogger("interp")
+    interp_logger = logging.getLogger("ShootingInterp")
     interp_logger.setLevel(logging.INFO)
-    logfile = logging.FileHandler(os.path.join(_dir, "record_interp.txt"))
+    logfile = logging.FileHandler(os.path.join(_dir, "record_shootinginterp.txt"))
     interp_logger.addHandler(logfile)
-    _output_file = os.path.join(_dir, "ipopt_interp_output.txt")
+    _output_file = os.path.join(_dir, "ipopt_shootinginterp_output.txt")
 
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective(p, target))
@@ -228,16 +204,18 @@ def outer_objective(px_guess, target):
     interp_logger.info(f"{divider} \nNonlinear parameters : {p}")
     interp_logger.info(f"{divider} \nLinear parameters : {x}")
 
-    return solution_object
+    return p, x.flatten()
 
-# solution_object = outer_objective(px_guess, dfsindy_target)
-
+# p, x = outer_objective(px_guess, dfsindy_target)
+# plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingInterpCoeff", _dir)
+# prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+# plot_trajectories(solution, prediction, time_span, 4, "ShootingInterpStates", _dir)
 
 ###############################################################################################################################################
-# Comparing with DFSINDy (shooting-interp) inner + DFSINDy (shooting-interp) outer (BiLevel NLP)
+# Comparing with BiLevel NLP : DFSINDy (shooting-interp) inner + DFSINDy (shooting-interp) outer 
 
 def f(p, x, target):
-    solution = odeint_diffrax(_foo_interp, pargs.rtol, pargs.atol, pargs.mxstep, xinit, time_span, (p.flatten(), x.flatten())) - xinit
+    solution = odeint_diffrax(_foo_interp, xinit, time_span, (p.flatten(), x.flatten()), pargs.rtol, pargs.atol, pargs.mxstep) - xinit
     return jnp.mean((solution - target)**2)
 
 def g(p, x) : return jnp.array([ ])
@@ -245,24 +223,18 @@ def g(p, x) : return jnp.array([ ])
 def h(p, x) : return x
 
 def simple_objective_shooting(f, g, p, states, target):
-    # states shape = (nexpt, T, nx) # no of experiments, time points, states. Target values for outer optimization
-    # target shape = (nexpt, T, nx) no of experiments, time points, states. Target values for inner optimization
-    # p shape = (nx * F, ) # no of nonlinear decision variables
-
     (x, _), _ = differentiable_regression(f, g, *tree_util.tree_map(jnp.atleast_2d, (p, x_guess)), (target, ))
     # x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
-    # solution = odeint_diffrax(_foo, rtol, atol, mxstep, xinit, time_span, (p, x))
-    # _loss = jnp.mean((solution - states)**2)
     _loss = f(p, x, target)
     return _loss, x
 
 def outer_objective_shooting(p_guess, solution, target):
     
-    shooting_logger = logging.getLogger("shooting")
+    shooting_logger = logging.getLogger("BiLevelShootingInterp")
     shooting_logger.setLevel(logging.INFO)
-    logfile = logging.FileHandler(os.path.join(_dir, "record_shooting.txt"))
+    logfile = logging.FileHandler(os.path.join(_dir, "record_bilevelshootinginterp.txt"))
     shooting_logger.addHandler(logfile)
-    _output_file = os.path.join(_dir, "ipopt_shooting_output.txt")
+    _output_file = os.path.join(_dir, "ipopt_bilevelshootinginterp_output.txt")
 
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_shooting(f, g, p, solution, target)[0])
@@ -298,13 +270,15 @@ def outer_objective_shooting(p_guess, solution, target):
     shooting_logger.info(f"{divider} \nNonlinear parameters : {p}")
     shooting_logger.info(f"{divider} \nLinear parameters : {x}")
 
-    return solution_object
+    return p, x.flatten()
 
-solution_object = outer_objective_shooting(p_guess, solution, dfsindy_target)
-
+p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
+plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
+prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+plot_trajectories(solution, prediction, time_span, 4, "BiLevelShootingInterpStates", _dir)
 
 ###############################################################################################################################################
-# Comparing with naive shooting (full NLP) 
+# Comparing with Full NLP : shooting / sequential optimization 
 
 def simple_objective_nlp(px, states):
     # states shape = (nexpt, T, nx) # no of experiments, time points, states. Target values for outer optimization
@@ -313,17 +287,17 @@ def simple_objective_nlp(px, states):
     # p shape = (nx * F, ) # no of nonlinear decision variables
     # small_ind shape = (nx, F)
     
-    solution = odeint_diffrax(_foo, pargs.rtol, pargs.atol, pargs.mxstep, xinit, time_span, unravel(px))
+    solution = odeint_diffrax(_foo, xinit, time_span, unravel(px), pargs.rtol, pargs.atol, pargs.mxstep)
     _loss = jnp.mean((solution - states)**2)
     return _loss
 
 def outer_objective_nlp(px_guess, solution):
     
-    nlp_logger = logging.getLogger("nlp")
+    nlp_logger = logging.getLogger("Shooting")
     nlp_logger.setLevel(logging.INFO)
-    logfile = logging.FileHandler(os.path.join(_dir, "record_nlp.txt"))
+    logfile = logging.FileHandler(os.path.join(_dir, "record_shooting.txt"))
     nlp_logger.addHandler(logfile)
-    _output_file = os.path.join(_dir, "ipopt_nlp_output.txt")
+    _output_file = os.path.join(_dir, "ipopt_shooting_output.txt")
 
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_nlp(p, solution))
@@ -359,83 +333,11 @@ def outer_objective_nlp(px_guess, solution):
     nlp_logger.info(f"{divider} \nNonlinear parameters : {p}")
     nlp_logger.info(f"{divider} \nLinear parameters : {x}")
 
-    return solution_object
+    return p, x.flatten()
 
-# solution_object = outer_objective_nlp(px_guess, solution)
+# p, x = outer_objective_nlp(px_guess, solution)
+# plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingCoeff", _dir)
+# prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+# plot_trajectories(solution, prediction, time_span, 4, "ShootingStates", _dir)
 
 ###############################################################################################################################################
-# Comparing with SINDy inner + DFSINDy shooting interp outer (BiLevel NLP)
-
-estimated_derivatives = interpolation_derivative(time_span).T
-
-def f_interp(p, x, target):
-    solution = odeint_diffrax(_foo_interp, pargs.rtol, pargs.atol, pargs.mxstep, xinit, time_span, (p.flatten(), x.flatten())) - xinit
-    return jnp.mean((solution - target)**2)
-
-def f(p, x, target):
-    # solution = odeint_diffrax(_foo_interp, rtol, atol, mxstep, xinit, time_span, (p.flatten(), x.flatten())) - xinit
-    solution = jax.vmap(_foo_interp, in_axes = (None, 0, (None, None)))(xinit, time_span, (p, x))
-    return jnp.mean((solution - target)**2)
-
-def g(p, x) : return jnp.array([ ])
-
-def h(p, x) : return x
-
-def simple_objective_sindy(f, g, p, states, target):
-    # states shape = (nexpt, T, nx) # no of experiments, time points, states. Target values for outer optimization
-    # target shape = (nexpt, T, nx) no of experiments, time points, states. Target values for inner optimization
-    # p shape = (nx * F, ) # no of nonlinear decision variables
-
-    # TODO outer optimization problem can be a DF-SINDy problem or a sequential/simultaneous optimization problem
-    # (x, _), _ = differentiable_regression(f, g, h, p, x_guess, (target, ))
-    x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
-    # solution = odeint_diffrax(_foo, pargs.rtol, pargs.atol, pargs.mxstep, xinit, time_span, (p, x))
-    # _loss = jnp.mean((solution - states)**2)
-    _loss = f_interp(p, x, states)
-    return _loss, x
-
-def outer_objective_sindy(p_guess, solution, target):
-    
-    sindy_logger = logging.getLogger("sindy")
-    sindy_logger.setLevel(logging.INFO)
-    logfile = logging.FileHandler(os.path.join(_dir, "record_sindy.txt"))
-    sindy_logger.addHandler(logfile)
-    _output_file = os.path.join(_dir, "ipopt_sindy_output.txt")
-
-    # JIT compiled objective function
-    _simple_obj = jax.jit(lambda p : simple_objective_sindy(f, g, p, solution, target)[0])
-    _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac))
-
-    def _simple_obj_error(p):
-        try :
-            sol = _simple_obj(p)
-        except : 
-            sol = jnp.inf
-        
-        return sol
-
-    solution_object = minimize_ipopt(
-        _simple_obj_error, 
-        x0 = p_guess, # restart from intial guess 
-        jac = _simple_jac,
-        hess = _simple_hess,  
-        tol = pargs.tol, 
-        options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
-        )
-        
-    sindy_logger.info(f"{divider}")
-    with open(_output_file, "r") as file:
-        for line in file : sindy_logger.info(line.strip())
-
-    os.remove(_output_file)
-
-    p = jnp.array(solution_object.x)
-    loss, x = simple_objective_sindy(f, g, p, solution, target)
-    sindy_logger.info(f"{divider} \nLoss {loss}")
-    sindy_logger.info(f"{divider} \nNonlinear parameters : {p}")
-    sindy_logger.info(f"{divider} \nLinear parameters : {x}")
-
-    return solution_object
-
-# solution_object = outer_objective_sindy(p_guess, dfsindy_target, estimated_derivatives)
