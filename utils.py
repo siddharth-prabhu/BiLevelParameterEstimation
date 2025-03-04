@@ -1,4 +1,5 @@
-from typing import Callable, Tuple
+import os
+from typing import Callable, Tuple, List, Any
 from functools import partial
 
 import jax
@@ -7,6 +8,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.scipy as jsp
 from jax import flatten_util
 from cyipopt import minimize_ipopt
+import diffrax
+import matplotlib.pyplot as plt
+plt.rcParams['text.usetex'] = True
 
 # Multiplies the svd decomposition of inverse of a matrix with a vector (v)
 def inv_vp(u, sinv, vh, v) : return vh.T @ ((u.T @ v) * sinv)
@@ -172,7 +176,73 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     _, f_rxp = jax.vjp(lambda _p : hx_vjp(m_opt, _p), p) # residual vjp wrt p
 
     # vjp of (v + m) wrt p is zero
+    # TODO consider accounting for v_dot and m_dot
     return f_Lzp((mu_x, mu_v))[0] - f_rxp(mu_x)[0], None, None
 
 constraint_differentiable_regression.defvjp(constraint_differentiable_regression_fwd, constraint_differentiable_regression_bwd)
 
+
+def odeint_diffrax(afunc : Callable, xinit : jnp.ndarray, time_span : jnp.ndarray, parameters : Any, rtol = 1e-6, atol = 1e-8, mxstep = 10_000) -> jnp.ndarray :
+    # Forward and reverse mode autodiff compatible ode solver
+    _afunc = lambda t, x, p : afunc(x, t, p)
+    return diffrax.diffeqsolve(
+                diffrax.ODETerm(_afunc), 
+                diffrax.Tsit5(),
+                t0 = time_span[0], # make sure that initial conditions are at time_span[0]
+                t1 = time_span[-1],
+                dt0 = None, 
+                saveat = diffrax.SaveAt(ts = time_span), 
+                y0 = xinit, 
+                args = parameters,
+                stepsize_controller = diffrax.PIDController(rtol=rtol, atol=atol, pcoeff = 0.4, icoeff = 0.3, dcoeff = 0.),
+                adjoint = diffrax.DirectAdjoint(), 
+                max_steps = mxstep
+        ).ys
+
+
+def plot_coefficients(params_actual : List[jnp.ndarray], params_obtained : List[jnp.ndarray], labels : List[List[str]], filename : str, path : str = ".") -> None :
+
+    assert len(params_actual) == len(params_obtained) == len(labels), "Should have same number of sets of parameters"
+    
+    alen = len(params_actual)
+    width = 0.25
+
+    with plt.style.context(["science", "notebook", "bright"]):
+            
+        fig, ax =  plt.subplots(alen, 1, figsize = (12, 4 * alen), gridspec_kw = {"wspace" : 0.3})
+        
+        for i, (p_actual, p_obtain, label) in enumerate(zip(params_actual, params_obtained, labels)) :
+            
+            x = jnp.arange(len(p_actual))
+            ax[i].bar(x, p_actual, label = "Actual", width = width)
+            ax[i].bar(x + width, p_obtain, label = "Predicted", width = width)                    
+
+            # ax[i].set(yscale = "log")
+            ax[i].set_xticks(x + width / 2, label)
+            ax[i].legend()
+
+        fig.tight_layout()
+        plt.savefig(os.path.join(path, filename), bbox_inches = "tight")
+        plt.close()
+
+def plot_trajectories(solution : jnp.ndarray, prediction : jnp.ndarray, time_span : jnp.ndarray, ncols : int, filename : str, path : str = ".") -> None :
+
+    assert solution.shape == prediction.shape, "List of solutions should have the same shape"
+    _, nx = solution.shape
+
+    with plt.style.context(["science", "notebook", "bright"]):
+
+        nrows = (nx + ncols - 1) // ncols
+        fig, ax =  plt.subplots(nrows, ncols, figsize = (6 * ncols, 5 * nrows), gridspec_kw = {"wspace" : 0.2})
+        ax = ax.ravel()
+
+        for i in range(nx) :
+            
+            ax[i].plot(time_span, solution[:, i], "o", label = "Actual")
+            ax[i].plot(time_span, prediction[:, i], label = "Predicted")                    
+            ax[i].set(ylabel = r"$x_" + f"{i}$", xlabel = "Time")
+            ax[i].legend()
+
+        fig.tight_layout()
+        plt.savefig(os.path.join(path, filename))
+        plt.close()
