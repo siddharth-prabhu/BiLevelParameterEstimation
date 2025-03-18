@@ -153,13 +153,13 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     
     gx_jvp = lambda t : jax.jvp(lambda x : _g(p, x), (x_opt, ), (t, ))[-1]
     gx_vjp = lambda ct : jax.vjp(lambda x : _g(p, x), x_opt)[-1](ct)[0]
+    gp_vjp = lambda ct : jax.vjp(lambda _p : _g(_p, x_opt), p)[-1](ct)[0]
+
     hx_vjp = lambda ct, p : jax.vjp(lambda x : _h(p, x), x_opt)[-1](ct)[0]
+    hp_vjp = lambda ct : jax.vjp(lambda _p : _h(_p, x_opt), p)[-1](ct)[0]
 
     def L(p, x, v, m) : return _f(p, x) + v @ _g(p, x) + m @ _h(p, x) # Lagrange function
-    L_x = jax.grad(L, argnums = 1)
 
-    # leverage block diagonal structure of hessian
-    # B_xx = jax.jacrev(L_x, argnums = 1)(p, x_opt, v_opt, m_opt) - jax.vmap(hx_vjp, in_axes = (0, None))(jax.vmap(hx_vjp, in_axes = (0, None))(jnp.diag(m_opt / _h(p, x_opt)), p).T, p)
     B_xx = jax.hessian(L, argnums = 1)(p, x_opt, v_opt, m_opt) - jax.vmap(hx_vjp, in_axes = (0, None))(jax.vmap(hx_vjp, in_axes = (0, None))(jnp.diag(m_opt / _h(p, x_opt)), p).T, p)
     (u, s, vh) = jnp.linalg.svd(B_xx, hermitian = True) # shape = (nx, nx), (nx, nx), (nx, nx)
     sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
@@ -170,14 +170,13 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     # Find the cotangents
     mu_v = inv_vp(gu, gsinv, gvh, v_dot - gx_jvp(inv_vp(u, sinv, vh, x_dot))) # shape = (g, )
     mu_x = - inv_vp(u, sinv, vh, x_dot + gx_vjp(mu_v)) # shape = (nx, )
+    mu_m = - (m_dot + hx_vjp(mu_x, p)) / _h(p, x_opt) # shape = (h, )
 
     # L_zp = d([Lx, Lv])/dp
     _, f_Lzp = jax.vjp(lambda _p : jax.grad(L, argnums = (1, 2))(_p, x_opt, v_opt, m_opt), p)
     _, f_rxp = jax.vjp(lambda _p : hx_vjp(m_opt, _p), p) # residual vjp wrt p
 
-    # vjp of (v + m) wrt p is zero
-    # TODO consider accounting for v_dot and m_dot
-    return f_Lzp((mu_x, mu_v))[0] - f_rxp(mu_x)[0], None, None
+    return f_Lzp((mu_x, mu_v))[0] - f_rxp(mu_x)[0] + gp_vjp(mu_v) + hp_vjp(mu_m), None, None
 
 constraint_differentiable_regression.defvjp(constraint_differentiable_regression_fwd, constraint_differentiable_regression_bwd)
 
