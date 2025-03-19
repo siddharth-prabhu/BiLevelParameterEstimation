@@ -156,7 +156,7 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     gp_vjp = lambda ct : jax.vjp(lambda _p : _g(_p, x_opt), p)[-1](ct)[0]
 
     hx_vjp = lambda ct, p : jax.vjp(lambda x : _h(p, x), x_opt)[-1](ct)[0]
-    hp_vjp = lambda ct : jax.vjp(lambda _p : _h(_p, x_opt), p)[-1](ct)[0]
+    hp_vjp = lambda ct : jax.vjp(lambda _p : m_opt * _h(_p, x_opt), p)[-1](ct)[0]
 
     def L(p, x, v, m) : return _f(p, x) + v @ _g(p, x) + m @ _h(p, x) # Lagrange function
 
