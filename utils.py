@@ -46,7 +46,7 @@ def differentiable_regression(f : Callable, g : Callable, p : jnp.ndarray, x_gue
     L_xx = jnp.einsum("ijk->jik", jax.vmap(Lxx_jvp)(T)) # shape = (nx, F, F)
 
     # jvp / vjp of equality constraints
-    gx_jvp = lambda t : jax.jvp(lambda x : g(p, x.reshape(nx, -1)), (x_guess.flatten(), ), (t, ))[-1]
+    gx_jvp = jax.linearize(lambda x : g(p, x.reshape(nx, -1)), x_guess.flatten())[-1]
     gx_vjp = lambda ct : jax.vjp(lambda x : g(p, x), x_guess)[-1](ct)[0]
 
     # Take pinv of block diagonal matrices in hessian of Lagrangian
@@ -71,12 +71,12 @@ def differentiable_regression_bwd(f : Callable, g : Callable, res : Tuple[jnp.nd
     (x_opt, v_opt), (u, sinv, vh, gu, gsinv, gvh), p, args = res
 
     gx_jvp = lambda t : jax.jvp(lambda x : g(p, x), (x_opt, ), (t, ))[-1]
-    _, gx_vjp = jax.vjp(lambda x : g(p, x), x_opt)
+    gx_vjp = lambda ct : jax.vjp(lambda x : g(p, x), x_opt)[-1](ct)[0]
     
     def L(p, x, v) : return f(p, x, *args) + v @ g(p, x) # Lagrangian of equality constraint optimization problem
 
     mu_v = inv_vp(gu, gsinv, gvh, v_dot - gx_jvp(jax.vmap(inv_vp)(u, sinv, vh, x_dot))) # shape = (g, )
-    mu_x = - jax.vmap(inv_vp)(u, sinv, vh, x_dot + gx_vjp(mu_v)[0]) # shape = (nx * F, )
+    mu_x = - jax.vmap(inv_vp)(u, sinv, vh, x_dot + gx_vjp(mu_v)) # shape = (nx * F, )
 
     # L_zp = d([Lx, Lv])/dp
     _, f_Lzp = jax.vjp(lambda _p : jax.grad(L, argnums = (1, 2))(_p, x_opt, v_opt), p)
@@ -151,7 +151,7 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     _g = lambda p, x : g(p, unravel(x))
     _h = lambda p, x : h(p, unravel(x))
     
-    gx_jvp = lambda t : jax.jvp(lambda x : _g(p, x), (x_opt, ), (t, ))[-1]
+    gx_jvp = jax.linearize(lambda x : _g(p, x), x_opt)[-1]
     gx_vjp = lambda ct : jax.vjp(lambda x : _g(p, x), x_opt)[-1](ct)[0]
     gp_vjp = lambda ct : jax.vjp(lambda _p : _g(_p, x_opt), p)[-1](ct)[0]
 

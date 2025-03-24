@@ -105,7 +105,7 @@ with plt.style.context(["science", "notebook", "bright"]) :
     plt.savefig(os.path.join(_dir, "states.png"))
     plt.close()
 
-
+# https://github.com/jax-ml/jax/discussions/13282
 @jax.custom_jvp
 def _interp(t):
     return jax.pure_callback(interpolations, jax.ShapeDtypeStruct((len(xinit), *t.shape), xinit.dtype), t)
