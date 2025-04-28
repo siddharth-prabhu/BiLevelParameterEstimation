@@ -86,7 +86,7 @@ def differentiable_regression_bwd(f : Callable, g : Callable, res : Tuple[jnp.nd
 differentiable_regression.defvjp(differentiable_regression_fwd, differentiable_regression_bwd)
 
 
-# Differentiable regression with equality and inequality constraints
+# Reverse-mode autdiff compatible differentiable regression with equality and inequality constraints
 @partial(jax.custom_vjp, nondiff_argnums = (0, 1, 2))
 def constraint_differentiable_regression(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
     # f = objective function arguments (p, x) -> scalar output (assumed as only reverse mode compatible) shape = ()
@@ -204,19 +204,23 @@ def plot_coefficients(params_actual : List[jnp.ndarray], params_obtained : List[
     assert len(params_actual) == len(params_obtained) == len(labels), "Should have same number of sets of parameters"
     
     alen = len(params_actual)
-    width = 0.25
+    width = 0.5
 
     with plt.style.context(["science", "notebook", "bright"]):
-            
-        fig, ax =  plt.subplots(alen, 1, figsize = (12, 4 * alen), gridspec_kw = {"wspace" : 0.3})
+        
+        # figsize = (width, height)
+        fig, ax =  plt.subplots(alen, 1, figsize = (14, 4 * alen), gridspec_kw = {"wspace" : 0.3})
         
         for i, (p_actual, p_obtain, label) in enumerate(zip(params_actual, params_obtained, labels)) :
             
             x = jnp.arange(len(p_actual))
-            ax[i].bar(x, p_actual, label = "Actual", width = width)
-            ax[i].bar(x + width, p_obtain, label = "Predicted", width = width)                    
+            rects = ax[i].bar(x, p_actual, label = "Actual", width = width)
+            ax[i].bar_label(rects, [f"{round(rect.get_height(), 2)}" if rect.get_height() != 0 else "" for rect in rects], padding = 3)
+            
+            rects = ax[i].bar(x + width, p_obtain, label = "Predicted", width = width)
+            ax[i].bar_label(rects, [f"{round(rect.get_height(), 2)}" if rect.get_height() != 0 else "" for rect in rects], padding = 3)
 
-            # ax[i].set(yscale = "log")
+            ax[i].margins(y = 0.2)
             ax[i].set_xticks(x + width / 2, label)
             ax[i].legend()
 
