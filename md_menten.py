@@ -22,7 +22,7 @@ from cyipopt import minimize_ipopt
 from scipy.integrate import odeint as scipy_odeint
 from scipy.interpolate import CubicSpline
 
-from utils import differentiable_regression, odeint_diffrax, plot_coefficients, plot_trajectories
+from utils import differentiable_optimization, odeint_diffrax, plot_coefficients, plot_trajectories
 
 
 # choose hyperparameters
@@ -35,6 +35,7 @@ parser.add_argument("--mxstep", type = int, default = 10_000, help = "The maximu
 parser.add_argument("--reg", type = float, default = 0.1, help = "L2 regularization penalty")
 parser.add_argument("--threshold", type = float, default = 0.1, help = "Thresholding parameter")
 parser.add_argument("--msg", type = str, default = "", help = "Sample msg that briefly describes this problem")
+parser.add_argument("--method", type = int, default = 0, help = "Formulation type 0 : BiLevelOpt (DFSINDy innter + DFSINDy outer), 2 : FullNLP (DFSINDy), 2 : FullNLP (shooting/sequential)")
 
 parser.add_argument("--id", type = str, default = "", help = "Slurm job id")
 parser.add_argument("--partition", type = str, default = "", help = "The partition this job is assigned to")
@@ -240,96 +241,10 @@ def f(p, x, small_ind, features, target, regularization):
 
 
 ###############################################################################################################################################
-# Comparing with BiLevel NLP : DFSINDy inner + shooting outer
-
-def simple_objective(f, g, p, states, small_ind):
-    (x, _), _ = differentiable_regression(f, g, p, jnp.zeros_like(p), (small_ind, ))
-    solution = jax.vmap(lambda xi, ti : odeint_diffrax(_foo, xi, time_span, (ti, p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep))(xinit, temperature)
-    _loss = jnp.mean((solution - states)**2)
-    return _loss, x
-
-def outer_objective(p_guess, solution, features, target, small_ind, reg, thresholding = 0.1, maxiter = 10):
-    
-    # implement sequential threshold least square algorithm
-    # TODO previous subproblems can have lower tolerance or less maximum iterations to eliminate the terms. How to choose initial tolerance ?
-    shooting_logger = logging.getLogger("BiLevelShooting")
-    shooting_logger.setLevel(logging.INFO)
-    logfile = logging.FileHandler(os.path.join(_dir, "record_bilevelshooting.txt"))
-    shooting_logger.addHandler(logfile)
-    _output_file = os.path.join(_dir, "ipopt_bilevelshooting_output.txt")
-
-    _, F = small_ind.shape
-    _ind = jnp.arange(F)
-    _f = partial(f, features = features, target = target, regularization = reg)
-    _g = g
-    
-    iteration = 0
-    p_guess, unravel = flatten_util.ravel_pytree(p_guess)
-
-    _simple_obj = jax.jit(lambda p, si : simple_objective(_f, _g, unravel(p), solution, si)[0])
-    _simple_jac = jax.jit(jax.grad(_simple_obj, argnums = 0))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac, argnums = 0))
-
-    def _simple_obj_error(p, si):
-        try :
-            sol = _simple_obj(p, si)
-        except : 
-            sol = jnp.inf
-        
-        return sol
-
-    while iteration < maxiter : 
-        
-        shooting_logger.info(f"{divider} \nIteration {iteration}, \nsmall index {small_ind}")
-
-        if iteration > 0 and jnp.allclose(prev_small_ind, small_ind) : 
-            shooting_logger.info("Optimal solution found")
-            break
-
-        solution_object = minimize_ipopt(
-            partial(_simple_obj_error, si = small_ind), 
-            x0 = p_guess, # restart from intial guess 
-            jac = partial(_simple_jac, si = small_ind),
-            hess = partial(_simple_hess, si = small_ind),  
-            tol = pargs.tol, 
-            options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
-            )
-        
-        shooting_logger.info(f"{divider}")
-        with open(_output_file, "r") as file:
-            for line in file : shooting_logger.info(line.strip())
-
-        os.remove(_output_file)
-
-        p = jnp.array(solution_object.x)
-        loss, x = simple_objective(_f, _g, unravel(p), solution, small_ind)
-        shooting_logger.info(f"{divider} \nIteration {iteration} : loss {loss}")
-        shooting_logger.info(f"{divider} \nNonlinear parameters : {unravel(p)}")
-        shooting_logger.info(f"{divider} \nLinear parameters : {x}")
-
-        prev_small_ind = small_ind
-        small_ind = jnp.minimum(
-            jax.vmap(lambda _x : jnp.where(jnp.abs(_x) < thresholding, _ind, F))(x), # new indices
-            prev_small_ind # previous indices
-        )
-        iteration += 1
-
-    return unravel(p), x
-
-# p, x = outer_objective(p_guess, solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
-# plot_coefficients(param_actual[0], [x[0], p[0]], param_labels[0], "BiLevelShootingCoeff1", _dir)
-# plot_coefficients(param_actual[1], [x[1], p[1]], param_labels[1], "BiLevelShootingCoeff2", _dir)
-# plot_coefficients(param_actual[2], [x[2], p[2]], param_labels[2], "BiLevelShootingCoeff3", _dir)
-# plot_coefficients(param_actual[3], [x[3], p[3]], param_labels[3], "BiLevelShootingCoeff4", _dir)
-# prediction = odeint_diffrax(_foo, xinit[0], time_span, (temperature[0], p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep)
-# plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingStates", _dir)
-
-
-###############################################################################################################################################
-# Comparing with BiLevel NLP : DFSINDy inner + DFSINDy shooting + interpolation outer
+# Comparing with BiLevel NLP : DFSINDy inner + DFSINDy outer
 
 def simple_objective_sindy(f, g, p, states, small_ind):
-    (x, _), _ = differentiable_regression(f, g, p, jnp.zeros_like(p), (small_ind, ))
+    (x, _), _ = differentiable_optimization(f, g, p, jnp.zeros_like(p), (small_ind, ))
     _loss = f(p, x, small_ind)
     return _loss, x
 
@@ -353,7 +268,7 @@ def outer_objective_sindy(p_guess, solution, features, target, small_ind, reg, t
 
     _simple_obj = jax.jit(lambda p, si : simple_objective_sindy(_f, _g, unravel(p), solution, si)[0])
     _simple_jac = jax.jit(jax.grad(_simple_obj, argnums = 0))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac, argnums = 0))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p, si):
         try :
@@ -400,13 +315,18 @@ def outer_objective_sindy(p_guess, solution, features, target, small_ind, reg, t
 
     return unravel(p), x
 
-p, x = outer_objective_sindy(p_guess, solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
-plot_coefficients(param_actual[0], [x[0], p[0]], param_labels[0], "BiLevelShootingInterpCoeff1", _dir)
-plot_coefficients(param_actual[1], [x[1], p[1]], param_labels[1], "BiLevelShootingInterpCoeff2", _dir)
-plot_coefficients(param_actual[2], [x[2], p[2]], param_labels[2], "BiLevelShootingInterpCoeff3", _dir)
-plot_coefficients(param_actual[3], [x[3], p[3]], param_labels[3], "BiLevelShootingInterpCoeff4", _dir)
-prediction = odeint_diffrax(_foo, xinit[0], time_span, (temperature[0], p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep)
-plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingInterpStates", _dir)
+if pargs.method == 0 : 
+    p, x = outer_objective_sindy(p_guess, solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
+    plot_coefficients(param_actual[0], [x[0], p[0]], param_labels[0], "BiLevelShootingInterpCoeff1", _dir)
+    plot_coefficients(param_actual[1], [x[1], p[1]], param_labels[1], "BiLevelShootingInterpCoeff2", _dir)
+    plot_coefficients(param_actual[2], [x[2], p[2]], param_labels[2], "BiLevelShootingInterpCoeff3", _dir)
+    plot_coefficients(param_actual[3], [x[3], p[3]], param_labels[3], "BiLevelShootingInterpCoeff4", _dir)
+    prediction = odeint_diffrax(_foo, xinit[0], time_span, (temperature[0], p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep)
+    plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingInterpStates", _dir)
+
+
+###############################################################################################################################################
+# Comparing with Full NLP (DFSINDy)
 
 
 ###############################################################################################################################################
@@ -434,13 +354,14 @@ def outer_objective_nlp(px_guess, solution, features, target, small_ind, reg, th
 
     _f = lambda p, si : f(*unravel(p), si, features = features, target = target, regularization = reg)
     _g = lambda p : g(*unravel(p))
+    _h = lambda p : h(*unravel(p))
     
     iteration = 0
 
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p, si : simple_objective_nlp(_f, unravel(p), solution, si))
     _simple_jac = jax.jit(jax.grad(_simple_obj, argnums = 0))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac, argnums = 0))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac, argnums = 0))
 
     def _simple_obj_error(p, si):
         try :
@@ -451,7 +372,9 @@ def outer_objective_nlp(px_guess, solution, features, target, small_ind, reg, th
 
     # JIT compiled constraints
     _g_jac = jax.jit(jax.jacobian(_g))
-    _g_hess = jax.jit(lambda p, v : jax.hessian(lambda _p : v @ _g(_p))(p))
+    _g_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _g_jac(_p))(p))
+    _h_jac = jax.jit(jax.jacfwd(_h))
+    _h_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _h_jac(_p))(p))
 
     while iteration < maxiter : 
         
@@ -466,7 +389,10 @@ def outer_objective_nlp(px_guess, solution, features, target, small_ind, reg, th
             x0 = px_guess, # restart from intial guess 
             jac = partial(_simple_jac, si = small_ind),
             hess = partial(_simple_hess, si = small_ind),  
-            constraints = {"type" : "eq", "fun" : _g, "jac" : _g_jac, "hess" : _g_hess},
+            constraints = [
+                {"type" : "eq", "fun" : _g, "jac" : _g_jac, "hess" : _g_hess}, 
+                {"type" : "ineq", "fun" : _h, "jac" : _h_jac, "hess" : _h_hess}
+                ],
             tol = pargs.tol, 
             options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
             )
@@ -491,11 +417,12 @@ def outer_objective_nlp(px_guess, solution, features, target, small_ind, reg, th
 
     return p, x
 
-# p, x = outer_objective_nlp((p_guess, jnp.zeros_like(p_guess)), solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
-# plot_coefficients(param_actual[0], [x[0], p[0]], param_labels[0], "ShootingCoeff1", _dir)
-# plot_coefficients(param_actual[1], [x[1], p[1]], param_labels[1], "ShootingCoeff2", _dir)
-# plot_coefficients(param_actual[2], [x[2], p[2]], param_labels[2], "ShootingCoeff3", _dir)
-# plot_coefficients(param_actual[3], [x[3], p[3]], param_labels[3], "ShootingCoeff4", _dir)
-# prediction = odeint_diffrax(_foo, xinit[0], time_span, (temperature[0], p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep)
-# plot_trajectories(solution[0], prediction, time_span, 4, "ShootingStates", _dir)
+if pargs.method == 2 : 
+    p, x = outer_objective_nlp((p_guess, jnp.zeros_like(p_guess)), solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
+    plot_coefficients(param_actual[0], [x[0], p[0]], param_labels[0], "ShootingCoeff1", _dir)
+    plot_coefficients(param_actual[1], [x[1], p[1]], param_labels[1], "ShootingCoeff2", _dir)
+    plot_coefficients(param_actual[2], [x[2], p[2]], param_labels[2], "ShootingCoeff3", _dir)
+    plot_coefficients(param_actual[3], [x[3], p[3]], param_labels[3], "ShootingCoeff4", _dir)
+    prediction = odeint_diffrax(_foo, xinit[0], time_span, (temperature[0], p, x), atol = pargs.atol, rtol = pargs.rtol, mxstep = pargs.mxstep)
+    plot_trajectories(solution[0], prediction, time_span, 4, "ShootingStates", _dir)
 

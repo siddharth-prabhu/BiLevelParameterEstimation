@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from pprint import pformat
 import argparse
+import operator
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +30,7 @@ parser.add_argument("--atol", type = float, default = 1e-8, help = "Absolute tol
 parser.add_argument("--rtol", type = float, default = 1e-6, help = "Relative tolerance of ode solver")
 parser.add_argument("--mxstep", type = int, default = 10_000, help = "The maximum number of steps a ode solver takes")
 parser.add_argument("--msg", type = str, default = "", help = "Sample msg that briefly describes this problem")
+parser.add_argument("--method", type = int, default = 0, help = "Formulation type 0 : BiLevelOpt (DFSINDy innter + DFSINDy outer), 1 : FullNLP (DFSINDy), 2 : FullNLP (shooting/sequential)")
 
 parser.add_argument("--id", type = str, default = "", help = "Slurm job id")
 parser.add_argument("--partition", type = str, default = "", help = "The partition this job is assigned to")
@@ -122,9 +124,9 @@ with plt.style.context(["science", "notebook", "bright"]) :
     plt.close()
 
 
-@jax.custom_vjp
+@jax.custom_jvp
 def _interp(t) : return jax.pure_callback(interpolations, jax.ShapeDtypeStruct((len(q_actual), len(xinit)), xinit.dtype), t)
-_interp.defvjp(lambda t : (_interp(t), None), lambda res, g_dot : (None, ))
+_interp.defjvp(lambda primals, tangents : (_interp(*primals), None))
 
 p_guess, x_guess = 2 * jnp.ones(21), jnp.zeros(15)
 px_guess, unravel = flatten_util.ravel_pytree((p_guess, x_guess))
@@ -157,10 +159,13 @@ def _foo_interp(z, t, px):
     return jax.vmap(_foo_interp_intermediate, in_axes = (0, None, None, 0))(z, t, px, q_actual).flatten()
 
 def _foo(z, t, px):
-    return jax.vmap(_foo_interp_intermediate, in_axes = (0, None, None, 0))(z, t, px, q_actual).flatten()
-
+    return jax.vmap(_foo_interp_intermediate, in_axes = (0, None, None, 0))(z, t, px, q_actual)
 
 dfsindy_target = solution - xinit
+
+def g(p, x) : return jnp.array([ ])
+
+def h(p, x) : return x[0:6]
 
 
 ###############################################################################################################################################
@@ -187,11 +192,19 @@ def outer_objective(px_guess, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective(p, target))
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.hessian(_simple_obj))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
+
+    _h = lambda px : h(*unravel(px))
+    _h_jac = jax.jit(jax.jacfwd(_h))
+    _h_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _h_jac(_p))(p))
+
+    _g = lambda px : g(*unravel(px))
+    _g_jac = jax.jit(jax.jacfwd(_g))
+    _g_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _g_jac(_p))(p))
 
     def _simple_obj_error(p):
         try :
-            sol = _simple_obj(p)
+            sol = _simple_obj(p) 
         except : 
             sol = jnp.inf
         
@@ -201,7 +214,11 @@ def outer_objective(px_guess, target):
         _simple_obj_error, 
         x0 = px_guess, # restart from intial guess 
         jac = _simple_jac,
-        hess = _simple_hess,  
+        hess = _simple_hess, 
+        constraints = [
+            {"type" : "ineq", "fun" : _h, "jac" : _h_jac, "hess" : _h_hess}, 
+            {"type" : "eq", "fun" : _g, "jac" : _g_jac, "hess" : _g_hess}
+            ], 
         tol = pargs.tol, 
         options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
         )
@@ -219,10 +236,11 @@ def outer_objective(px_guess, target):
 
     return p, x
 
-# p, x = outer_objective(px_guess, dfsindy_target)
-# plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "ShootingInterpCoeff", _dir)
-# prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
-# plot_trajectories(solution[0], prediction, time_span, 4, "ShootingInterpStates", _dir)
+if pargs.method == 1 : 
+    p, x = outer_objective(px_guess, dfsindy_target)
+    plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "ShootingInterpCoeff", _dir)
+    prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
+    plot_trajectories(solution[0], prediction, time_span, 4, "ShootingInterpStates", _dir)
 
 ###############################################################################################################################################
 # Comparing with BiLevel NLP : DFSINDy (shooting + interpolation) inner + DFSINDy (shooting + interpolation) outer 
@@ -238,10 +256,6 @@ def f(p, x, target):
     ))
 
     return jnp.mean((solution - target)**2)
-
-def g(p, x) : return jnp.array([ ])
-
-def h(p, x) : return x[0:6]
 
 def simple_objective_shooting(f, g, p, states, target):
     x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
@@ -259,7 +273,7 @@ def outer_objective_shooting(p_guess, solution, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_shooting(f, g, p, solution, target)[0])
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -292,10 +306,11 @@ def outer_objective_shooting(p_guess, solution, target):
 
     return p, x
 
-p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
-plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "BiLevelShootingCoeff", _dir)
-prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
-plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingStates", _dir)
+if pargs.method == 0 : 
+    p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
+    plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "BiLevelShootingCoeff", _dir)
+    prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
+    plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingStates", _dir)
 
 
 ###############################################################################################################################################
@@ -303,11 +318,8 @@ plot_trajectories(solution[0], prediction, time_span, 4, "BiLevelShootingStates"
 
 def simple_objective_nlp(px, states):
 
-    _xinit = jnp.tile(xinit, (nlen, ))
-    solution = jnp.stack(jnp.array_split(
-        odeint_diffrax(_foo, _xinit, time_span, unravel(px), pargs.rtol, pargs.atol, pargs.mxstep),
-        nlen, axis = 1
-    ))
+    _xinit = jnp.tile(xinit, (nlen, 1))
+    solution = jax.vmap(operator.sub, in_axes = (1, 0))(odeint_diffrax(_foo, _xinit, time_span, unravel(px), pargs.rtol, pargs.atol, pargs.mxstep), _xinit)
     _loss = jnp.mean((solution - states)**2)
     return _loss
 
@@ -322,21 +334,32 @@ def outer_objective_nlp(px_guess, solution):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_nlp(p, solution))
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.hessian(_simple_obj))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
+
+    _h = lambda px : h(*unravel(px))
+    _h_jac = jax.jit(jax.jacfwd(_h))
+    _h_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _h_jac(_p))(p))
+
+    _g = lambda px : g(*unravel(px))
+    _g_jac = jax.jit(jax.jacfwd(_g))
+    _g_hess = jax.jit(lambda p, v : jax.jacfwd(lambda _p : v @ _g_jac(_p))(p))
 
     def _simple_obj_error(p):
         try :
             sol = _simple_obj(p)
         except : 
             sol = jnp.inf
-        
         return sol
 
     solution_object = minimize_ipopt(
         _simple_obj_error, 
-        x0 = px_guess, # restart from intial guess 
+        x0 = px_guess,
         jac = _simple_jac,
         hess = _simple_hess,  
+        constraints = [
+            {"type" : "ineq", "fun" : _h, "jac" : _h_jac, "hess" : _h_hess}, 
+            {"type" : "eq", "fun" : _g, "jac" : _g_jac, "hess" : _g_hess}
+            ],
         tol = pargs.tol, 
         options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
         )
@@ -354,7 +377,8 @@ def outer_objective_nlp(px_guess, solution):
 
     return p, x
 
-# p, x = outer_objective_nlp(px_guess, solution)
-# plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "ShootingCoeff", _dir)
-# prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
-# plot_trajectories(solution[0], prediction, time_span, 4, "ShootingStates", _dir)
+if pargs.method == 2 : 
+    p, x = outer_objective_nlp(px_guess, solution)
+    plot_coefficients(jnp.array_split(p_actual, [len(x_guess)]), [x, p], param_labels, "ShootingCoeff", _dir)
+    prediction = odeint(mendes, xinit, time_span, (jnp.concatenate((x, p)), q_actual[0]))
+    plot_trajectories(solution[0], prediction, time_span, 4, "ShootingStates", _dir)

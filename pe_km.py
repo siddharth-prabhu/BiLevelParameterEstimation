@@ -14,7 +14,7 @@ from cyipopt import minimize_ipopt
 from scipy.interpolate import CubicSpline
 from ddeint import ddeint
 
-from utils import differentiable_regression, odeint_diffrax, plot_coefficients, plot_trajectories
+from utils import differentiable_optimization, odeint_diffrax, plot_coefficients, plot_trajectories
 
 # Choose Hyperparameters
 parser = argparse.ArgumentParser("ParameterEstimationKermackMcKendrick")
@@ -24,6 +24,7 @@ parser.add_argument("--atol", type = float, default = 1e-8, help = "Absolute tol
 parser.add_argument("--rtol", type = float, default = 1e-6, help = "Relative tolerance of ode solver")
 parser.add_argument("--mxstep", type = int, default = 10_000, help = "The maximum number of steps a ode solver takes")
 parser.add_argument("--msg", type = str, default = "", help = "Sample msg that briefly describes this problem")
+parser.add_argument("--method", type = int, default = 0, help = "Formulation type 0 : BiLevelOpt (DFSINDy innter + DFSINDy outer), 1 : FullNLP (DFSINDy)")
 
 parser.add_argument("--id", type = str, default = "", help = "Slurm job id")
 parser.add_argument("--partition", type = str, default = "", help = "The partition this job is assigned to")
@@ -152,7 +153,7 @@ dfsindy_target = solution - solution[0]
 # Comparing with BiLevel NLP : DFSINDy (shooting + interpolation) inner + DFSINDy (shooting + interpolation) outer 
 
 def f(p, x, target):
-    solution = odeint_diffrax(_foo_interp, xinit, time_span, (p.flatten(), x.flatten()), pargs.rtol, pargs.atol, pargs.mxstep) - xinit
+    solution = odeint_diffrax(_foo_interp, xinit, time_span, (p, x), pargs.rtol, pargs.atol, pargs.mxstep) - xinit
     return jnp.mean((solution - target)**2)
 
 def g(p, x) : return jnp.array([ ])
@@ -161,8 +162,7 @@ def simple_objective_shooting(f, g, p, states, target):
     # states shape = (nexpt, T, nx) # no of experiments, time points, states. Target values for outer optimization
     # target shape = (nexpt, T, nx) no of experiments, time points, states. Target values for inner optimization
     # p shape = (nx * F, ) # no of nonlinear decision variables
-    (x, _), _ = differentiable_regression(f, g, *tree_util.tree_map(jnp.atleast_2d, (p, x_guess)), (target, ))
-    # x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
+    (x, _), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
     _loss = f(p, x, target)
     return _loss, x
 
@@ -177,7 +177,7 @@ def outer_objective_shooting(p_guess, solution, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_shooting(f, g, p, solution, target)[0])
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -210,10 +210,11 @@ def outer_objective_shooting(p_guess, solution, target):
 
     return p.flatten(), x.flatten()
 
-p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
-plot_coefficients([*p_actual], [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
-prediction = ddeint(km, lambda t : xinit, time_span, fargs = ((x, p), ))
-plot_trajectories(solution, prediction, time_span, 3, "BiLevelShootingInterpStates", _dir)
+if pargs.method == 0 : 
+    p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
+    plot_coefficients([*p_actual], [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
+    prediction = ddeint(km, lambda t : xinit, time_span, fargs = ((x, p), ))
+    plot_trajectories(solution, prediction, time_span, 3, "BiLevelShootingInterpStates", _dir)
 
 ###############################################################################################################################################
 # Comparing with Full NLP : DFSINDy shooting + interpolation 
@@ -234,7 +235,7 @@ def outer_objective(px_guess, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective(p, target))
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.hessian(_simple_obj))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -266,8 +267,12 @@ def outer_objective(px_guess, target):
 
     return p.flatten(), x.flatten()
 
-# p, x = outer_objective(px_guess, dfsindy_target)
-# plot_coefficients([*p_actual], [x, p], param_labels, "ShootingInterpCoeff", _dir)
-# prediction = ddeint(km, lambda t : xinit, time_span, fargs = ((x, p), ))
-# plot_trajectories(solution, prediction, time_span, 3, "ShootingInterpStates", _dir)
+if pargs.method == 1 : 
+    p, x = outer_objective(px_guess, dfsindy_target)
+    plot_coefficients([*p_actual], [x, p], param_labels, "ShootingInterpCoeff", _dir)
+    prediction = ddeint(km, lambda t : xinit, time_span, fargs = ((x, p), ))
+    plot_trajectories(solution, prediction, time_span, 3, "ShootingInterpStates", _dir)
 
+###############################################################################################################################################
+# Comparing with Full NLP : shooting / sequential optimization 
+# Will need sensitivities across DDE to perform these calculations

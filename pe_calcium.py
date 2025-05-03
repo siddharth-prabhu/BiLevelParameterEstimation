@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from cyipopt import minimize_ipopt
 from scipy.interpolate import CubicSpline
 
-from utils import differentiable_regression, odeint_diffrax, plot_coefficients, plot_trajectories
+from utils import differentiable_optimization, odeint_diffrax, plot_coefficients, plot_trajectories
 
 # Choose Hyperparameters
 parser = argparse.ArgumentParser("ParameterEstimationCalciumIon")
@@ -25,6 +25,7 @@ parser.add_argument("--atol", type = float, default = 1e-8, help = "Absolute tol
 parser.add_argument("--rtol", type = float, default = 1e-6, help = "Relative tolerance of ode solver")
 parser.add_argument("--mxstep", type = int, default = 10_000, help = "The maximum number of steps a ode solver takes")
 parser.add_argument("--msg", type = str, default = "", help = "Sample msg that briefly describes this problem")
+parser.add_argument("--method", type = int, default = 0, help = "Formulation type 0 : BiLevelOpt (DFSINDy innter + DFSINDy outer), 1 : FullNLP (DFSINDy), 2 : FullNLP (shooting/sequential)")
 
 parser.add_argument("--id", type = str, default = "", help = "Slurm job id")
 parser.add_argument("--partition", type = str, default = "", help = "The partition this job is assigned to")
@@ -127,9 +128,9 @@ def _foo(z, t, px):
     ])
 
 
-@jax.custom_vjp
+@jax.custom_jvp
 def _interp(t) : return jax.pure_callback(interpolations, jax.ShapeDtypeStruct(xinit.shape, xinit.dtype), t)
-_interp.defvjp(lambda t : (_interp(t), ), lambda res, g_dot : (None, ))
+_interp.defjvp(lambda primals, tangents : (_interp(*primals), None))
 
 
 p_guess, x_guess = jnp.ones(6), jnp.ones(11)
@@ -174,7 +175,7 @@ def outer_objective(px_guess, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective(p, target))
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.hessian(_simple_obj))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -206,10 +207,11 @@ def outer_objective(px_guess, target):
 
     return p, x.flatten()
 
-# p, x = outer_objective(px_guess, dfsindy_target)
-# plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingInterpCoeff", _dir)
-# prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
-# plot_trajectories(solution, prediction, time_span, 4, "ShootingInterpStates", _dir)
+if pargs.method == 1 : 
+    p, x = outer_objective(px_guess, dfsindy_target)
+    plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingInterpCoeff", _dir)
+    prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+    plot_trajectories(solution, prediction, time_span, 4, "ShootingInterpStates", _dir)
 
 ###############################################################################################################################################
 # Comparing with BiLevel NLP : DFSINDy (shooting-interp) inner + DFSINDy (shooting-interp) outer 
@@ -220,11 +222,8 @@ def f(p, x, target):
 
 def g(p, x) : return jnp.array([ ])
 
-def h(p, x) : return x
-
 def simple_objective_shooting(f, g, p, states, target):
-    (x, _), _ = differentiable_regression(f, g, *tree_util.tree_map(jnp.atleast_2d, (p, x_guess)), (target, ))
-    # x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
+    (x, _), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
     _loss = f(p, x, target)
     return _loss, x
 
@@ -239,7 +238,7 @@ def outer_objective_shooting(p_guess, solution, target):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_shooting(f, g, p, solution, target)[0])
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.jacrev(_simple_jac))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -272,10 +271,11 @@ def outer_objective_shooting(p_guess, solution, target):
 
     return p, x.flatten()
 
-p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
-plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
-prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
-plot_trajectories(solution, prediction, time_span, 4, "BiLevelShootingInterpStates", _dir)
+if pargs.method == 0 :
+    p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
+    plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
+    prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+    plot_trajectories(solution, prediction, time_span, 4, "BiLevelShootingInterpStates", _dir)
 
 ###############################################################################################################################################
 # Comparing with Full NLP : shooting / sequential optimization 
@@ -302,7 +302,7 @@ def outer_objective_nlp(px_guess, solution):
     # JIT compiled objective function
     _simple_obj = jax.jit(lambda p : simple_objective_nlp(p, solution))
     _simple_jac = jax.jit(jax.grad(_simple_obj))
-    _simple_hess = jax.jit(jax.hessian(_simple_obj))
+    _simple_hess = jax.jit(jax.jacfwd(_simple_jac))
 
     def _simple_obj_error(p):
         try :
@@ -335,9 +335,10 @@ def outer_objective_nlp(px_guess, solution):
 
     return p, x.flatten()
 
-# p, x = outer_objective_nlp(px_guess, solution)
-# plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingCoeff", _dir)
-# prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
-# plot_trajectories(solution, prediction, time_span, 4, "ShootingStates", _dir)
+if pargs.method == 2 : 
+    p, x = outer_objective_nlp(px_guess, solution)
+    plot_coefficients(jnp.array_split(p_actual, [11]), [x, p], param_labels, "ShootingCoeff", _dir)
+    prediction = odeint(calcium_ion, xinit, time_span, jnp.concatenate((x, p)))
+    plot_trajectories(solution, prediction, time_span, 4, "ShootingStates", _dir)
 
 ###############################################################################################################################################
