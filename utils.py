@@ -15,80 +15,88 @@ plt.rcParams['text.usetex'] = True
 # Multiplies the svd decomposition of inverse of a matrix with a vector (v)
 def inv_vp(u, sinv, vh, v) : return vh.T @ ((u.T @ v) * sinv)
 
-# Differentiable regression with only equality constraints
-@partial(jax.custom_vjp, nondiff_argnums = (0, 1))
-def differentiable_regression(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
-
+##########################################################################################################################################################
+# Differentiable optimization with equality constraints
+# For convex quadratic inner optimization problem
+def _differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] : 
     # f = objective function arguments (p, x) -> scalar output
     # g = equality constraints arguments (p, x) -> vector output
-    # p = nonlinear decision variables shape (nx, F) # atleast 2d
-    # x_guess = linear decision variables shape (nx, x) # atleast 2d 
+    # p = nonlinear decision variables shape (np, ) # atleast 1d
+    # x_guess = linear decision variables shape (nx, ) # atleast 1d 
 
     # F = number of features (columns) in the library
     # g = number of equality constraints
 
-    # p and x may not have same last dimensions. However they should have the same first dimension 
-    nx, F = p.shape
-    _, xF = x_guess.shape
+    x_guess, unravel = flatten_util.ravel_pytree(x_guess)
+    _f = lambda p, x : f(p, unravel(x), *args)
+    _g = lambda p, x : g(p, unravel(x))
 
-    v_guess = jnp.zeros_like(g(p, x_guess))
-    eps = 10. * max(nx, F, 1) * jnp.array(jnp.finfo(p.dtype).eps)
+    v_guess = jnp.zeros_like(_g(p, x_guess))
+    eps = 10. * max(*x_guess.shape, 1) * jnp.array(jnp.finfo(x_guess.dtype).eps)
 
-    # p : shape (nx * F, 1), x : shape = (nx, F), v : shape = (g, )
-    def L(p, x, v) : return f(p, x, *args) + v @ g(p, x) # Lagrangian of equality constraint optimization problem
-
-    L_x, L_v = jax.grad(L, argnums = (1, 2))(p, x_guess, v_guess) # shape = (nx, F), (g, )
-    
-    # Since equality constraints are linear in x, the Hessian of Lagrangian is the Hessian of the objective function. 
-    # Therefore, parallel implementation of Block diagonal hessians can be exploited
-    Lxx_jvp = lambda t : jax.jvp(jax.grad(lambda x : L(p, x, v_guess)), (x_guess, ), (t, ))[-1]
-    T = jax.vmap(lambda t : jnp.tile(t, (nx, 1)))(jnp.eye(xF)) # create tangent vector. shape = (F, nx, F)
-    L_xx = jnp.einsum("ijk->jik", jax.vmap(Lxx_jvp)(T)) # shape = (nx, F, F)
+    def L(p, x, v) : return _f(p, x) + v @ _g(p, x) # Lagrangian of equality constraint optimization problem
 
     # jvp / vjp of equality constraints
-    gx_jvp = jax.linearize(lambda x : g(p, x.reshape(nx, -1)), x_guess.flatten())[-1]
-    gx_vjp = lambda ct : jax.vjp(lambda x : g(p, x), x_guess)[-1](ct)[0]
+    gx_jvp = jax.linearize(lambda x : _g(p, x), x_guess)[-1]
+    gx_vjp = lambda ct : jax.vjp(lambda x : _g(p, x), x_guess)[-1](ct)[0]
 
-    # Take pinv of block diagonal matrices in hessian of Lagrangian
-    (u, s, vh) = jax.vmap(partial(jnp.linalg.svd, hermitian = True))(L_xx) # shape = (nx, F, F), (nx, F), (nx, F, F)
+    L_x, L_v = jax.grad(L, argnums = (1, 2))(p, x_guess, v_guess)
+    
+    L_xx = jax.hessian(L, argnums = 1)(p, x_guess, v_guess)
+    (u, s, vh) = jnp.linalg.svd(L_xx, hermitian = True, full_matrices = False) 
     sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
 
-    (gu, gs, gvh) = jnp.linalg.svd(jax.vmap(gx_jvp)(jsp.linalg.block_diag(*vh)).T @ jnp.diag(sinv.flatten()) @ jax.vmap(gx_jvp)(jsp.linalg.block_diag(*u).T), hermitian = True)
+    (gu, gs, gvh) = jnp.linalg.svd(jax.vmap(gx_jvp)(vh).T @ jnp.diag(sinv) @ jax.vmap(gx_jvp)(u.T), hermitian = True, full_matrices = False)
     gsinv = jnp.where(gs <= eps * jnp.max(gs, initial = -jnp.inf), 0., 1/gs) # initial value is provided to deal with zero dimensional arrays
 
-    dv = inv_vp(gu, gsinv, gvh, L_v - gx_jvp(jax.vmap(inv_vp)(u, sinv, vh, L_x).flatten())) # shape = (g, )
-    x_opt = x_guess - jax.vmap(inv_vp)(u, sinv, vh, L_x + gx_vjp(dv)) # shape = (nx, F)
+    dv = inv_vp(gu, gsinv, gvh, L_v + gx_jvp(inv_vp(u, sinv, vh, - L_x))) # shape = (g, )
+    x_opt = x_guess - inv_vp(u, sinv, vh, L_x + gx_vjp(dv)) # shape = (nx, )
 
-    return (x_opt, v_guess + dv), (u, sinv, vh, gu, gsinv, gvh) # (optimal x, optimal Lagrange variables), inverse of hessian of Lagrangian
+    return (unravel(x_opt), v_guess + dv), (u, sinv, vh, gu, gsinv, gvh) # (optimal x, optimal Lagrange variables), inverse of hessian of Lagrangian
 
-def differentiable_regression_fwd(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
-    optimal_solution, inverse = differentiable_regression(f, g, p, x_guess, args)
-    return (optimal_solution, inverse), (optimal_solution, inverse, p, args)
 
-def differentiable_regression_bwd(f : Callable, g : Callable, res : Tuple[jnp.ndarray], g_dot : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+# Forward- and reverse-mode autodiff compatible differentiable optimization with equality constraints
+@partial(jax.custom_jvp, nondiff_argnums = (0, 1))
+def differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+    return _differentiable_optimization(f, g, p, x_guess, args)
+
+@differentiable_optimization.defjvp
+def differentiable_optimization_fwd(f : Callable, g : Callable, primals : Tuple[jnp.ndarray], tangents : Tuple[jnp.ndarray]):
     
-    (x_dot, v_dot), _ = g_dot
-    (x_opt, v_opt), (u, sinv, vh, gu, gsinv, gvh), p, args = res
-
-    gx_jvp = lambda t : jax.jvp(lambda x : g(p, x), (x_opt, ), (t, ))[-1]
-    gx_vjp = lambda ct : jax.vjp(lambda x : g(p, x), x_opt)[-1](ct)[0]
+    p, x_guess, args = primals
+    p_dot, *_ = tangents
     
-    def L(p, x, v) : return f(p, x, *args) + v @ g(p, x) # Lagrangian of equality constraint optimization problem
+    # Note that reusing the inverses from forward pass gives incorrect higher order derivatives (> 1). 
+    # However, in BiLevel optimization, terms containing higer order derivatives are canceled out.
+    # Therefore, such a scheme works and also saves on recomputing the inverses again
+    (x_opt, v_opt), (u, sinv, vh, gu, gsinv, gvh) = differentiable_optimization(f, g, p, x_guess, args)
 
-    mu_v = inv_vp(gu, gsinv, gvh, v_dot - gx_jvp(jax.vmap(inv_vp)(u, sinv, vh, x_dot))) # shape = (g, )
-    mu_x = - jax.vmap(inv_vp)(u, sinv, vh, x_dot + gx_vjp(mu_v)) # shape = (nx * F, )
+    x_opt, unravel = flatten_util.ravel_pytree(x_opt)
+    _f = lambda p, x : f(p, unravel(x), *args)
+    _g = lambda p, x : g(p, unravel(x))
 
-    # L_zp = d([Lx, Lv])/dp
-    _, f_Lzp = jax.vjp(lambda _p : jax.grad(L, argnums = (1, 2))(_p, x_opt, v_opt), p)
+    gx_jvp = jax.linearize(lambda x : _g(p, x), x_opt)[-1]
+    gx_vjp = lambda ct : jax.vjp(lambda x : _g(p, x), x_opt)[-1](ct)[0]
+    
+    def L(p, x, v) : return _f(p, x) + v @ _g(p, x) # Lagrangian of equality constraint optimization problem
 
-    return f_Lzp((mu_x, mu_v))[0], None, None
+    v = jax.tree_util.tree_map(
+        jnp.negative, 
+        [
+            jax.jvp(lambda _p : jax.grad(L, argnums = 1)(_p, x_opt, v_opt), (p, ), (p_dot, ))[-1], 
+            jax.jvp(lambda _p : _g(_p, x_opt), (p, ), (p_dot, ))[-1],
+        ])
+    
+    mu_v = inv_vp(gu, gsinv, gvh, gx_jvp(inv_vp(u, sinv, vh, v[0])) - v[1]) # shape = (g, )
+    mu_x = inv_vp(u, sinv, vh, v[0] - gx_vjp(mu_v)) # shape = (nx, )
+    
+    return ((unravel(x_opt), v_opt), (u, sinv, vh, gu, gsinv, gvh)), ((unravel(mu_x), mu_v), jax.tree_util.tree_map(jnp.zeros_like, (u, sinv, vh, gu, gsinv, gvh)))
 
-differentiable_regression.defvjp(differentiable_regression_fwd, differentiable_regression_bwd)
 
-
-# Reverse-mode autdiff compatible differentiable regression with equality and inequality constraints
-@partial(jax.custom_vjp, nondiff_argnums = (0, 1, 2))
-def constraint_differentiable_regression(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+##########################################################################################################################################################
+# For general convex inner optimization problem
+# Differentiable optimization with equality and inequality constraints
+def _constraint_differentiable_optimization(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
     # f = objective function arguments (p, x) -> scalar output (assumed as only reverse mode compatible) shape = ()
     # g = equality constraints arguments (p, x) -> vector output (should be forward and reverse mode compatible) shape = (ng, )
     # h = inequality constraints (h >= 0) arguments (p, x) -> vector output (should be forward and reverse mode compatible) shape = (h, )
@@ -121,7 +129,7 @@ def constraint_differentiable_regression(f : Callable, g : Callable, h : Callabl
             tol = 1e-5, 
             options = {"maxiter" : 1000, "disp" : 0, "sb" : "yes"}
         )
-        print("Inner optimization problem success : ", res.success)
+        if not res.success : print("Inner optimization problem failed with message : ", res.message)
         x = jnp.array(res.x) # optimal primal variables
         v, m = map(jnp.array, (res.info["mult_g"][:ng], res.info["mult_g"][ng:])) # optimal dual variables corresponding to equality constraints and inequality constraints respectively
         return x, v, m
@@ -134,11 +142,17 @@ def constraint_differentiable_regression(f : Callable, g : Callable, h : Callabl
 
     return unravel(x_opt), v, m # (optimal primal variables, optimal dual variables)
 
-def constraint_differentiable_regression_fwd(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
-    optimal_solution = constraint_differentiable_regression(f, g, h, p, x_guess, args)
+
+# Reverse-mode autdiff compatible differentiable optimization with equality and inequality constraints
+@partial(jax.custom_vjp, nondiff_argnums = (0, 1, 2))
+def constraint_differentiable_optimization_rev(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+    return _constraint_differentiable_optimization(f, g, h, p, x_guess, args)
+
+def constraint_differentiable_optimization_rev_fwd(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+    optimal_solution = constraint_differentiable_optimization_rev(f, g, h, p, x_guess, args)
     return optimal_solution, (optimal_solution, p, args)
 
-def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Callable, res : Tuple[jnp.ndarray], g_dot : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+def constraint_differentiable_optimization_rev_bwd(f : Callable, g : Callable, h : Callable, res : Tuple[jnp.ndarray], g_dot : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
     
     x_dot, v_dot, m_dot = g_dot
     (x_opt, v_opt, m_opt), p, args = res
@@ -168,9 +182,10 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
     gsinv = jnp.where(gs <= eps * jnp.max(gs, initial = -jnp.inf), 0., 1/gs) # initial value is provided to deal with zero dimensional arrays
 
     # Find the cotangents
-    mu_v = inv_vp(gu, gsinv, gvh, v_dot - gx_jvp(inv_vp(u, sinv, vh, x_dot))) # shape = (g, )
-    mu_x = - inv_vp(u, sinv, vh, x_dot + gx_vjp(mu_v)) # shape = (nx, )
-    mu_m = - (m_dot + hx_vjp(mu_x, p)) / _h(p, x_opt) # shape = (h, )
+    x_hat_dot = x_dot - hx_vjp(m_dot * m_opt / _h(p, x_opt), p)
+    mu_v = inv_vp(gu, gsinv, gvh, v_dot - gx_jvp(inv_vp(u, sinv, vh, x_hat_dot))) # shape = (g, )
+    mu_x = - inv_vp(u, sinv, vh, x_hat_dot + gx_vjp(mu_v)) # shape = (nx, )
+    mu_m = - (m_dot + jax.jvp(lambda x : _h(p, x), (x_opt, ), (mu_x, ))[-1]) / _h(p, x_opt) # shape = (h, )
 
     # L_zp = d([Lx, Lv])/dp
     _, f_Lzp = jax.vjp(lambda _p : jax.grad(L, argnums = (1, 2))(_p, x_opt, v_opt, m_opt), p)
@@ -178,9 +193,59 @@ def constraint_differentiable_regression_bwd(f : Callable, g : Callable, h : Cal
 
     return f_Lzp((mu_x, mu_v))[0] - f_rxp(mu_x)[0] + gp_vjp(mu_v) + hp_vjp(mu_m), None, None
 
-constraint_differentiable_regression.defvjp(constraint_differentiable_regression_fwd, constraint_differentiable_regression_bwd)
+constraint_differentiable_optimization_rev.defvjp(constraint_differentiable_optimization_rev_fwd, constraint_differentiable_optimization_rev_bwd)
 
 
+# Forward- and reverse-mode autodiff compatible differentiable optimization with equality and inequality constriants
+@partial(jax.custom_jvp, nondiff_argnums = (0, 1, 2))
+def constraint_differentiable_optimization(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] : 
+    return _constraint_differentiable_optimization(f, g, h, p, x_guess, args)
+
+@constraint_differentiable_optimization.defjvp
+def constraint_differentiable_optimization_fwd(f : Callable, g : Callable, h : Callable, primals : Tuple[jnp.ndarray], tangents : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
+    p, x_guess, args = primals
+    p_dot, _, _ = tangents
+
+    x_opt, v_opt, m_opt = constraint_differentiable_optimization(f, g, h, p, x_guess, args)
+    eps = 10. * max(*x_opt.shape, 1) * jnp.array(jnp.finfo(x_opt.dtype).eps)
+
+    x_opt, unravel = flatten_util.ravel_pytree(x_opt)
+
+    _f = lambda p, x : f(p, unravel(x), *args)
+    _g = lambda p, x : g(p, unravel(x))
+    _h = lambda p, x : h(p, unravel(x))
+    
+    gx_jvp = jax.linearize(lambda x : _g(p, x), x_opt)[-1]
+    gx_vjp = lambda ct : jax.vjp(lambda x : _g(p, x), x_opt)[-1](ct)[0]
+    hx_vjp = lambda ct, p : jax.vjp(lambda x : _h(p, x), x_opt)[-1](ct)[0]
+
+    def L(p, x, v, m) : return _f(p, x) + v @ _g(p, x) + m @ _h(p, x) # Lagrange function
+
+    v = jax.tree_util.tree_map(
+        jnp.negative, 
+        [
+            jax.jvp(lambda _p : jax.grad(L, argnums = 1)(_p, x_opt, v_opt, m_opt), (p, ), (p_dot, ))[-1], 
+            jax.jvp(lambda _p : _g(_p, x_opt), (p, ), (p_dot, ))[-1],
+            jax.jvp(lambda _p : m_opt * _h(_p, x_opt), (p, ), (p_dot, ))[-1]
+        ])
+
+    v_hat = v[0] - hx_vjp(v[2] / _h(p, x_opt), p)
+
+    B_xx = jax.hessian(L, argnums = 1)(p, x_opt, v_opt, m_opt) - jax.vmap(hx_vjp, in_axes = (0, None))(jax.vmap(hx_vjp, in_axes = (0, None))(jnp.diag(m_opt / _h(p, x_opt)), p).T, p)
+    (u, s, vh) = jnp.linalg.svd(B_xx, hermitian = True, full_matrices = False) # shape = (nx, nx), (nx, nx), (nx, nx)
+    sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
+
+    (gu, gs, gvh) = jnp.linalg.svd(jax.vmap(gx_jvp)(vh).T @ jnp.diag(sinv) @ jax.vmap(gx_jvp)(u.T), hermitian = True, full_matrices = False)
+    gsinv = jnp.where(gs <= eps * jnp.max(gs, initial = -jnp.inf), 0., 1/gs) # initial value is provided to deal with zero dimensional arrays
+
+    mu_v = inv_vp(gu, gsinv, gvh, gx_jvp(inv_vp(u, sinv, vh, v_hat)) - v[1]) # shape = (g, )
+    mu_x = inv_vp(u, sinv, vh, v_hat - gx_vjp(mu_v)) # shape = (nx, )
+    mu_m = (v[2] - m_opt * jax.jvp(lambda x : _h(p, x), (x_opt, ), (mu_x, ))[-1]) / _h(p, x_opt) # shape = (h, )
+
+    return (unravel(x_opt), v_opt, m_opt), (unravel(mu_x), mu_v, mu_m)
+
+
+##########################################################################################################################################################
 def odeint_diffrax(afunc : Callable, xinit : jnp.ndarray, time_span : jnp.ndarray, parameters : Any, rtol = 1e-6, atol = 1e-8, mxstep = 10_000) -> jnp.ndarray :
     # Forward and reverse mode autodiff compatible ode solver
     _afunc = lambda t, x, p : afunc(x, t, p)
@@ -203,13 +268,14 @@ def plot_coefficients(params_actual : List[jnp.ndarray], params_obtained : List[
 
     assert len(params_actual) == len(params_obtained) == len(labels), "Should have same number of sets of parameters"
     
+    np = max(map(len, params_actual))
     alen = len(params_actual)
-    width = 0.5
+    width = 0.4
 
     with plt.style.context(["science", "notebook", "bright"]):
         
         # figsize = (width, height)
-        fig, ax =  plt.subplots(alen, 1, figsize = (14, 4 * alen), gridspec_kw = {"wspace" : 0.3})
+        fig, ax =  plt.subplots(alen, 1, figsize = (1.5 * np, 4 * alen), gridspec_kw = {"wspace" : 0.3})
         
         for i, (p_actual, p_obtain, label) in enumerate(zip(params_actual, params_obtained, labels)) :
             
@@ -236,11 +302,10 @@ def plot_trajectories(solution : jnp.ndarray, prediction : jnp.ndarray, time_spa
     with plt.style.context(["science", "notebook", "bright"]):
 
         nrows = (nx + ncols - 1) // ncols
-        fig, ax =  plt.subplots(nrows, ncols, figsize = (6 * ncols, 5 * nrows), gridspec_kw = {"wspace" : 0.2})
+        fig, ax =  plt.subplots(nrows, ncols, figsize = (7 * ncols, 5 * nrows), gridspec_kw = {"wspace" : 0.2})
         ax = ax.ravel()
 
         for i in range(nx) :
-            
             ax[i].plot(time_span, solution[:, i], "o", label = "Actual")
             ax[i].plot(time_span, prediction[:, i], label = "Predicted")                    
             ax[i].set(ylabel = r"$x_" + f"{i}$", xlabel = "Time")
