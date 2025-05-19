@@ -162,9 +162,9 @@ def simple_objective_shooting(f, g, p, states, target):
     # states shape = (nexpt, T, nx) # no of experiments, time points, states. Target values for outer optimization
     # target shape = (nexpt, T, nx) no of experiments, time points, states. Target values for inner optimization
     # p shape = (nx * F, ) # no of nonlinear decision variables
-    (x, _), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
-    _loss = f(p, x, target)
-    return _loss, x
+    (x_opt, v_opt), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
+    _loss = f(p, x_opt, target) @ v_opt @ g(p, x_opt)
+    return _loss, x_opt
 
 def outer_objective_shooting(p_guess, solution, target):
     

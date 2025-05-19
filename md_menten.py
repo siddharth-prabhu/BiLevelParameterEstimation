@@ -81,7 +81,7 @@ def kinetic(x, t, p, T) -> jnp.ndarray:
 
 # Generate data
 nx = 4
-nexpt = 8
+nexpt = 3
 key = jrandom.PRNGKey(20)
 key_temp, key_xinit = jrandom.split(key, 2)
 _temp = [365, 370, 380.]
@@ -244,9 +244,9 @@ def f(p, x, small_ind, features, target, regularization):
 # Comparing with BiLevel NLP : DFSINDy inner + DFSINDy outer
 
 def simple_objective_sindy(f, g, p, states, small_ind):
-    (x, _), _ = differentiable_optimization(f, g, p, jnp.zeros_like(p), (small_ind, ))
-    _loss = f(p, x, small_ind)
-    return _loss, x
+    (x_opt, v_opt), _ = differentiable_optimization(f, g, p, jnp.zeros_like(p), (small_ind, ))
+    _loss = f(p, x_opt, small_ind) + v_opt @ g(p, x_opt)
+    return _loss, x_opt
 
 def outer_objective_sindy(p_guess, solution, features, target, small_ind, reg, thresholding = 0.1, maxiter = 10):
     

@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from cyipopt import minimize_ipopt
 from scipy.interpolate import CubicSpline
 
-from utils import constraint_differentiable_regression, odeint_diffrax, plot_coefficients, plot_trajectories
+from utils import constraint_differentiable_optimization, odeint_diffrax, plot_coefficients, plot_trajectories
 
 
 # Choose Hyperparameters
@@ -258,9 +258,9 @@ def f(p, x, target):
     return jnp.mean((solution - target)**2)
 
 def simple_objective_shooting(f, g, p, states, target):
-    x, *_ = constraint_differentiable_regression(f, g, h, p, x_guess, (target, ))
-    _loss = f(p, x, target)
-    return _loss, x
+    (x_opt, v_opt, m_opt), _ = constraint_differentiable_optimization(f, g, h, p, x_guess, (target, ))
+    _loss = f(p, x_opt, target) + v_opt @ g(p, x_opt) + m_opt @ h(p, x_opt)
+    return _loss, x_opt
 
 def outer_objective_shooting(p_guess, solution, target):
     

@@ -223,9 +223,9 @@ def f(p, x, target):
 def g(p, x) : return jnp.array([ ])
 
 def simple_objective_shooting(f, g, p, states, target):
-    (x, _), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
-    _loss = f(p, x, target)
-    return _loss, x
+    (x_opt, v_opt), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
+    _loss = f(p, x_opt, target) + v_opt @ g(p, x_opt)
+    return _loss, x_opt
 
 def outer_objective_shooting(p_guess, solution, target):
     
