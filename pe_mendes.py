@@ -38,7 +38,7 @@ parser.add_argument("--cpus", type = int, default = 1, help = "Maximum number of
 
 pargs = parser.parse_args()
 
-_dir = os.path.join("log", str(datetime.now()))
+_dir = os.path.join("log", "Mendes", str(datetime.now()))
 divider = "--"*50 # printing separater
 if not os.path.exists(_dir) : os.makedirs(_dir)
 

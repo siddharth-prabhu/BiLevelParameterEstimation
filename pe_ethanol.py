@@ -72,10 +72,10 @@ nexpt = 15
 nx = 4
 key = jrandom.PRNGKey(20)
 param_labels = [
-    [r"$k_{p1}$", r"$k_{p1}^{\prime}$", r"$k_{p2}^{\prime}$"], # linear parameters
+    [r"$\mu _m$", r"$\nu _{p_1}$", r"$\nu _{p_2}$"], # linear parameters
     [
-        r"$\mu _m$", r"$k_s$", r"$k_{p2}$", r"$v_{p1}$", r"$k_s^{\prime}$", r"$v_{p2}$", r"$k_s^{\prime \prime}$", r"$k_{s1}$", r"$k_{p11}$", r"$k_{p21}$", r"$k_{s1}^{\prime}$", 
-        r"$k_{p11}^{\prime}$", r"$k_{s1}^{\prime \prime}$", r"$k_{p21}^{\prime}$", r"$Y_{p1/s}$", r"$Y_{p2/s}$"
+        r"$K_{p_1}$", r"$K_{p_1}^{\prime}$", r"$K_{p_2}^{\prime}$", r"$K_s$", r"$K_{p_2}$", r"$K_s^{\prime}$", r"$K_s^{\prime \prime}$", r"$K_{s_1}$", r"$K_{p_{11}}$", r"$K_{p_{21}}$", r"$K_{s_1}^{\prime}$", 
+        r"$K_{p_{11}}^{\prime}$", r"$K_{s_1}^{\prime \prime}$", r"$K_{p_{21}}^{\prime}$", r"$Y_{p_1/s}$", r"$Y_{p_2/s}$"
     ] # non linear parameters
 ]
 
