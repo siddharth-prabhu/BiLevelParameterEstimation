@@ -323,7 +323,10 @@ def outer_objective_sindy(p_guess, solution, features, target, small_ind, reg, t
         iteration += 1
 
     p_opt = unravel(p) * jnp.where(small_ind == F, 1., 0.) # set small index coefficients to zero
-    return p_opt, x
+    x_opt = unravel(x) * jnp.where(small_ind == F, 1., 0.)
+    sindy_logger.info(f"{divider} \nNonlinear parameters : {p_opt}")
+    sindy_logger.info(f"{divider} \nLinear parameters : {x_opt}")
+    return p_opt, x_opt
 
 if pargs.method == 0 : 
     p, x = outer_objective_sindy(p_guess, solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold, pargs.siters)
@@ -423,7 +426,11 @@ def outer_objective_nlp(px_guess, solution, features, target, small_ind, reg, th
         )
         iteration += 1
 
-    return p, x
+    p_opt = unravel(p) * jnp.where(small_ind == F, 1., 0.) # set small index coefficients to zero
+    x_opt = unravel(x) * jnp.where(small_ind == F, 1., 0.)
+    nlp_logger.info(f"{divider} \nNonlinear parameters : {p_opt}")
+    nlp_logger.info(f"{divider} \nLinear parameters : {x_opt}")
+    return p_opt, x_opt
 
 if pargs.method == 2 : 
     p, x = outer_objective_nlp((p_guess, jnp.zeros_like(p_guess)), solution, dfsindy_features, dfsindy_target, small_ind, pargs.reg, pargs.threshold)
