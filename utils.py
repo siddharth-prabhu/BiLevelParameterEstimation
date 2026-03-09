@@ -1,20 +1,23 @@
 import os
-from typing import Callable, Tuple, List, Any
-from functools import partial
+from typing import Callable, Tuple, List, Any, Iterable, Optional
+import functools
+import itertools as it
 
 import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 from jax import flatten_util, tree_util
 from cyipopt import minimize_ipopt
+from scipy.interpolate import CubicSpline as SCubicSpline
 import diffrax
 import matplotlib.pyplot as plt
 plt.rcParams['text.usetex'] = True
 
+
+##########################################################################################################################################################
 # Multiplies the svd decomposition of inverse of a matrix with a vector (v)
 def inv_vp(u, sinv, vh, v) : return vh.T @ ((u.T @ v) * sinv)
 
-##########################################################################################################################################################
 # Differentiable optimization with equality constraints
 # For convex quadratic inner optimization problem
 def _differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] : 
@@ -43,7 +46,8 @@ def _differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_
     
     L_xx = jax.hessian(L, argnums = 1)(p, x_guess, v_guess)
     (u, s, vh) = jnp.linalg.svd(L_xx, hermitian = True, full_matrices = False) 
-    sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
+    # sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
+    sinv = jnp.where(s <= eps, 0., 1/s)
 
     (gu, gs, gvh) = jnp.linalg.svd(jax.vmap(gx_jvp)(vh).T @ jnp.diag(sinv) @ jax.vmap(gx_jvp)(u.T), hermitian = True, full_matrices = False)
     gsinv = jnp.where(gs <= eps * jnp.max(gs, initial = -jnp.inf), 0., 1/gs) # initial value is provided to deal with zero dimensional arrays
@@ -55,7 +59,7 @@ def _differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_
 
 
 # Forward- and reverse-mode autodiff compatible differentiable optimization with equality constraints
-@partial(jax.custom_jvp, nondiff_argnums = (0, 1))
+@functools.partial(jax.custom_jvp, nondiff_argnums = (0, 1))
 def differentiable_optimization(f : Callable, g : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
     return _differentiable_optimization(f, g, p, x_guess, args)
 
@@ -147,7 +151,8 @@ def _constraint_differentiable_optimization(f : Callable, g : Callable, h : Call
 
     B_xx = jax.hessian(L, argnums = 1)(p, x_opt, v_opt, m_opt) - jax.vmap(hx_vjp, in_axes = (0, None))(jax.vmap(hx_vjp, in_axes = (0, None))(jnp.diag(m_opt / h(p, unravel(x_opt))), p).T, p)
     (u, s, vh) = jnp.linalg.svd(B_xx, hermitian = True, full_matrices = False) # shape = (nx, nx), (nx, nx), (nx, nx)
-    sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
+    # sinv = jnp.where(s <= eps * jnp.max(s, initial = -jnp.inf), 0., 1/s) # initial value is provided to deal with zero dimensional arrays
+    sinv = jnp.where(s <= eps, 0., 1/s) # works for stiff problems
 
     (gu, gs, gvh) = jnp.linalg.svd(jax.vmap(gx_jvp)(vh).T @ jnp.diag(sinv) @ jax.vmap(gx_jvp)(u.T), hermitian = True, full_matrices = False)
     gsinv = jnp.where(gs <= eps * jnp.max(gs, initial = -jnp.inf), 0., 1/gs) # initial value is provided to deal with zero dimensional arrays
@@ -156,7 +161,7 @@ def _constraint_differentiable_optimization(f : Callable, g : Callable, h : Call
 
 """
 # Reverse-mode autdiff compatible differentiable optimization with equality and inequality constraints
-@partial(jax.custom_vjp, nondiff_argnums = (0, 1, 2))
+@functools.partial(jax.custom_vjp, nondiff_argnums = (0, 1, 2))
 def constraint_differentiable_optimization_rev(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] :
     return _constraint_differentiable_optimization(f, g, h, p, x_guess, args)
 
@@ -201,7 +206,7 @@ constraint_differentiable_optimization_rev.defvjp(constraint_differentiable_opti
 """
 
 # Forward- and reverse-mode autodiff compatible differentiable optimization with equality and inequality constriants
-@partial(jax.custom_jvp, nondiff_argnums = (0, 1, 2))
+@functools.partial(jax.custom_jvp, nondiff_argnums = (0, 1, 2))
 def constraint_differentiable_optimization(f : Callable, g : Callable, h : Callable, p : jnp.ndarray, x_guess : jnp.ndarray, args : Tuple[jnp.ndarray]) -> Tuple[jnp.ndarray] : 
     return _constraint_differentiable_optimization(f, g, h, p, x_guess, args)
 
@@ -240,6 +245,7 @@ def constraint_differentiable_optimization_fwd(f : Callable, g : Callable, h : C
 
 
 ##########################################################################################################################################################
+# Forward and reverse mode autodiff compatible ordinary differential equation solver
 def odeint_diffrax(afunc : Callable, xinit : jnp.ndarray, time_span : jnp.ndarray, parameters : Any, rtol = 1e-6, atol = 1e-8, mxstep = 10_000) -> jnp.ndarray :
     # Forward and reverse mode autodiff compatible ode solver
     _afunc = lambda t, x, p : afunc(x, t, p)
@@ -258,10 +264,75 @@ def odeint_diffrax(afunc : Callable, xinit : jnp.ndarray, time_span : jnp.ndarra
         ).ys
 
 
-def plot_coefficients(params_actual : List[jnp.ndarray], params_obtained : List[jnp.ndarray], labels : List[List[str]], filename : str, path : str = ".") -> None :
+##########################################################################################################################################################
+# Differentiable root-finding 
+
+Pytree = Any
+
+def flatten_output(afunc, unravel_first_arg):
+    @functools.wraps(afunc)
+    def _afunc(*args):
+        x, *args = args
+        return jax.flatten_util.ravel_pytree(afunc(unravel_first_arg(x), *args))[0]
+    return _afunc
+
+def newton_method(f : Callable, z_guess : jnp.ndarray) -> jnp.ndarray :
+    # solves root finding problem : f(z) = 0 using newtons method 
+    # Every linear solve uses explicit hessian 
+
+    # function is only forward and reverse mode autodiff compatible
+    grad_f = jax.jacfwd(f)
+    
+    def body_fun(val):
+        dval = jnp.linalg.solve(grad_f(val), f(val))
+        return val - dval
+    
+    def cond_fun(val):
+        return jnp.linalg.norm(f(val)) > 1e-8
+    
+    def scan_fun(carry, xs):
+        carry = jax.lax.cond(cond_fun(carry), body_fun, lambda carry : carry, carry)
+        return carry, None
+
+    z, _ = jax.lax.scan(scan_fun, z_guess, xs = None, length = 20.)
+    return z
+
+@functools.partial(jax.custom_jvp, nondiff_argnums = (0, 1))
+def _root_finding_fwd(solver : Callable, f : Callable, z : jnp.ndarray, p : Pytree) -> Pytree :
+    # Forward-mode auto diff compatible root finding problem with f : Rn -> Rn
+    return solver(lambda z : f(z, p), z)
+
+@_root_finding_fwd.defjvp
+def _root_finding_fwd_fwd(solver, f, primals, tangents):
+    z, p = primals
+    _, pdot = tangents
+    
+    zstar = _root_finding_fwd(solver, f, z, p)
+    # computing the jacobian is cheaper (in this case) than solving another root-finding problem
+    tangents_out = jnp.linalg.solve(jax.jacfwd(f)(zstar, p), - jax.jvp(lambda p : f(zstar, p), (p, ), (pdot, ))[-1])
+    return zstar, tangents_out
+
+def root_finding_fwd(f : Callable, z : Pytree, p : Pytree) -> Pytree : 
+    # Forward- and reverse-mode autodiff compatible root finding problem. 
+    # Note that reusing inverse incorrectly predicts higher order derivatives (> 1)
+
+    z_flat, unravel = flatten_util.ravel_pytree(z)
+    _f = flatten_output(f, unravel_first_arg = unravel)
+    z_opt = _root_finding_fwd(newton_method, _f, z_flat, p)
+    return unravel(z_opt)
+
+
+##########################################################################################################################################################
+def plot_coefficients(
+        params_actual : List[jnp.ndarray], params_obtained : List[jnp.ndarray], labels : List[List[str]], 
+        filename : str, path : str = ".", separate : bool = True
+    ) -> None :
 
     assert len(params_actual) == len(params_obtained) == len(labels), "Should have same number of sets of parameters"
     
+    if not separate : 
+        params_actual, params_obtained, labels = map(lambda x : [list(it.chain(*x))], (params_actual, params_obtained, labels))
+
     np = max(map(len, params_actual))
     alen = len(params_actual)
     width = 0.4
@@ -269,20 +340,22 @@ def plot_coefficients(params_actual : List[jnp.ndarray], params_obtained : List[
     with plt.style.context(["science", "notebook", "bright"]):
         
         # figsize = (width, height)
-        fig, ax =  plt.subplots(alen, 1, figsize = (1.5 * np, 4 * alen), gridspec_kw = {"wspace" : 0.3})
-        
+        fig, ax =  plt.subplots(alen, 1, figsize = (max(1.5 * np, 10), max(4 * alen, 5)), gridspec_kw = {"wspace" : 0.5})
+        if not separate : ax = [ax] # wrap in a list for compatibility
+
         for i, (p_actual, p_obtain, label) in enumerate(zip(params_actual, params_obtained, labels)) :
             
             x = jnp.arange(len(p_actual))
             rects = ax[i].bar(x, p_actual, label = "Actual", width = width)
-            ax[i].bar_label(rects, [f"{round(rect.get_height(), 2)}" if rect.get_height() != 0 else "" for rect in rects], padding = 3)
+            ax[i].bar_label(rects, [f"{rect.get_height():.2e}" if rect.get_height() != 0 else "" for rect in rects], padding = 3, rotation = "vertical")
             
             rects = ax[i].bar(x + width, p_obtain, label = "Predicted", width = width)
-            ax[i].bar_label(rects, [f"{round(rect.get_height(), 2)}" if rect.get_height() != 0 else "" for rect in rects], padding = 3)
+            ax[i].bar_label(rects, [f"{rect.get_height():.2e}" if rect.get_height() != 0 else "" for rect in rects], padding = 3, rotation = "vertical")
 
-            ax[i].margins(y = 0.2)
             ax[i].set_xticks(x + width / 2, label)
-            ax[i].legend()
+            ax[i].set_yscale("symlog", linthresh = 1)
+            ax[i].margins(y = 0.3)
+            ax[i].legend() # ax[i].legend(loc = "upper left")
 
         fig.tight_layout()
         plt.savefig(os.path.join(path, filename), bbox_inches = "tight")
@@ -302,9 +375,210 @@ def plot_trajectories(solution : jnp.ndarray, prediction : jnp.ndarray, time_spa
         for i in range(nx) :
             ax[i].plot(time_span, solution[:, i], "o", label = "Actual")
             ax[i].plot(time_span, prediction[:, i], label = "Predicted")                    
-            ax[i].set(ylabel = r"$x_" + f"{i}$", xlabel = "Time")
+            ax[i].set(ylabel = fr"$x_{{{i}}}$", xlabel = "Time")
             ax[i].legend()
 
         fig.tight_layout()
         plt.savefig(os.path.join(path, filename))
         plt.close()
+
+
+##########################################################################################################################################################
+# Differentiable Cubic Spline Interpolation
+
+def CubicSplineParameters(t, y) : 
+    # Gives the optimal values of parameters of cubic polynomial given time range t and function values y
+    
+    npoints = len(t)
+    cubic_poly = lambda t, tj, p : jnp.dot(p, jnp.array([(t - tj)**3, (t - tj)**2, (t - tj), 1.]))
+    _f = jax.vmap(cubic_poly) # polynomial evaluation
+    _jac = jax.vmap(lambda t, tj, p : jnp.dot(p, jnp.array([3*(t - tj)**2, 2*(t - tj), 1, 0]))) # first-order derivative w.r.t time
+    _hess = jax.vmap(lambda t, tj, p : jnp.dot(p, jnp.array([6*(t - tj), 2, 0, 0.]))) # second-order derivative w.r.t time
+    _ghess = jax.vmap(lambda t, tj, p : jnp.dot(p, jnp.array([6, 0, 0, 0.]))) # third-order derivative w.r.t time
+
+    # _jac = jax.vmap(jax.grad(cubic_poly)) # first-order derivative w.r.t time
+    # _hess = jax.vmap(jax.hessian(cubic_poly)) # second-order derivative w.r.t time
+    # _ghess = jax.vmap(jax.grad(jax.hessian(cubic_poly))) # third-order derivative w.r.t time
+
+    def hvp(v, t) : 
+        # v is vector of all the parameters (4 * (n - 1))
+        _v = v.reshape(-1, 4) # shape (n - 1, 4)
+        
+        return jnp.concatenate([
+            _f(t[:-1], t[:-1], _v), # (n - 1) equations
+            _f(t[1:], t[:-1], _v), # (n - 1) equations
+            _jac(t[1:-1], t[:-2], _v[:-1]) - _jac(t[1:-1], t[1:-1], _v[1:]), # (n - 2) equations
+            _hess(t[1:-1], t[:-2], _v[:-1]) - _hess(t[1:-1], t[1:-1], _v[1:]), # (n - 2) equations
+            _ghess(t[1:2], t[:1], _v[:1]) - _ghess(t[1:2], t[1:2], _v[1:2]), # 1 equation. Not-a-Knot spline
+            _ghess(t[-2:-1], t[-3:-2], _v[-2:-1]) - _ghess(t[-2:-1], t[-2:-1], _v[-1:]) # 1 equation. Not-a-Knot spline
+        ])
+
+    y = jnp.atleast_2d(y) # shape (n, ny)
+    return jnp.linalg.solve(
+        jax.vmap(hvp, in_axes = (0, None))(jnp.eye(4 * (npoints - 1)), t).T, 
+        jnp.concatenate((y[:-1], y[1:], jnp.zeros(shape = (2 * npoints - 2, y.shape[-1]))))
+    ) # shape (4 * (n - 1), ny)
+
+def CubicSplineSimulate(ti, t, p) :    
+    # Get values at time points ti, for given time range t and parameters p
+    
+    cubic_poly = lambda t, tj, p : jnp.dot(p, jnp.array([(t - tj)**3, (t - tj)**2, (t - tj), 1.]))
+    p = p.reshape(-1, 4) # shape (n - 1, 4)
+
+    # Append duplicates of first and last set of parameters to account for edge cases (ti < t0) & (ti > tf)
+    _p = jnp.vstack((p[:1, :], p, p[-1:, :]))
+    _t = jnp.array([-jnp.inf, *t, jnp.inf])
+    _tj = jnp.array([t[0], *t[:-1], t[-2]])
+    return jnp.sum(
+        jnp.where(
+            (ti > _t[:-1]) & (ti <= _t[1:]),
+            jax.vmap(cubic_poly, in_axes = (None, 0, 0))(ti, _tj, _p),
+            jnp.zeros_like(ti)
+        )
+    )
+
+@jax.custom_jvp
+def CubicSplineParametersScipy(t, y) :
+    
+    def _scipy_interp_params(t, y) : 
+        return jnp.vstack(jnp.einsum("ijk->jik", SCubicSpline(t, y).c))
+    
+    return jax.pure_callback(_scipy_interp_params, jax.ShapeDtypeStruct((4 * (y.shape[0] - 1), y.shape[1]), y.dtype), t, y)
+
+@CubicSplineParametersScipy.defjvp
+def CubicSplineParametersScipy_fwd(primals, tangents):
+    t, y = primals
+    _, ydot = tangents
+    n, ny = y.shape
+
+    # Because pure_callback is not linear in tangent space, custom jvp would not be sufficient for vjp
+    # p = CubicSplineParametersScipy(t, y)
+    # p_out = CubicSplineParametersScipy(t, ydot)
+    
+    # Computing explicit inverse makes the jvp linear in tangent space and therefore reverse-mode differentiable
+    # We need CubicSpline to be forward and reverse mode differentiable because we compute Hessian
+    p, AinvI = jnp.array_split(CubicSplineParametersScipy(t, jnp.concatenate((y, jnp.eye(n)), axis = 1)), [ny], axis = 1)
+    p_out = AinvI @ ydot
+    return p, p_out
+
+@functools.partial(jax.jit, static_argnums = (3, ))
+def CubicSpline(ti : jnp.ndarray, t : jnp.ndarray, y : jnp.ndarray, method : str = "jax") -> jnp.ndarray :
+    # https://sites.millersville.edu/rbuchanan/math375/CubicSpline.pdf
+    # Fully differentiable Cubic Spline Interpolation
+    # Given measurements y at time points t. The time arguments are ti
+    _y = y if y.ndim == 2 else y[:, jnp.newaxis] # makes sure that array is 2D. 
+    popt = CubicSplineParameters(t, _y) if method == "jax" else CubicSplineParametersScipy(t, _y)
+    return jax.vmap(
+        jax.vmap(CubicSplineSimulate, in_axes = (None, None, 1)), 
+        in_axes = (0, None, None)
+    )(jnp.atleast_1d(ti), t, popt) 
+
+
+##########################################################################################################################################################
+# Implementation of Orthogonal Collocation 
+
+def OrthogonalCollocationFormulation(
+        dynamics : Callable, xinit : jnp.ndarray, time_span : jnp.ndarray, solution : jnp.ndarray, nstates : int, nparams : int,
+        d : int = 3, nint : int = 1, nexpt : int = 1, method : str = "legendre", args : Optional[jnp.ndarray] = None
+    ):
+    
+    # https://www.do-mpc.com/en/latest/theory_orthogonal_collocation.html
+    # https://github.com/casadi/casadi/blob/main/docs/examples/python/direct_collocation.py
+
+    # dynamics = A function representing the dynamics 
+    # xinit = Initial states (Assumed to be known)
+    # time_span = Equally spaced time interval
+    # solution = The values of the states at time time_span. Multiple experiments are stacked as columns
+    # nstates = Dimensions of the states
+    # nparams = Number of unknown parameters
+    # d = Degree of interpolating polynomial
+    # nint = Number of collocation intervals between measurements
+    # nexpt = Number of independant experiments
+    # method = collocation points chosen using either legendre or radau scheme
+    # args = any additional arguments passed to the dynamic function
+
+    import numpy as np
+    import casadi as cd
+
+    opti = cd.Opti() # Casadi optimization stack
+
+    tau_root = np.append(0, cd.collocation_points(d, method)) # Get collocation points
+    C = np.zeros((d + 1, d + 1)) # Coefficients of the collocation equation
+    D = np.zeros(d + 1) # Coefficients of the continuity equation
+    B = np.zeros(d + 1) # Coefficients of the quadrature function
+
+    # Construct polynomial basis
+    for j in range(d + 1):
+        # Construct Lagrange polynomials to get the polynomial basis at the collocation point
+        p = np.poly1d([1])
+        for r in range(d + 1):
+            if r != j:
+                p *= np.poly1d([1, -tau_root[r]]) / (tau_root[j]-tau_root[r])
+
+        # Evaluate the polynomial at the final time to get the coefficients of the continuity equation
+        D[j] = p(1.0)
+
+        # Evaluate the time derivative of the polynomial at all collocation points to get the coefficients of the continuity equation
+        pder = np.polyder(p)
+        for r in range(d + 1) :
+            C[j, r] = pder(tau_root[r])
+
+        # Evaluate the integral of the polynomial to get the coefficients of the quadrature function
+        pint = np.polyint(p)
+        B[j] = pint(1)
+
+    # Declare model variables
+    x_sym = cd.MX.sym("x", nstates)
+    p_sym = cd.MX.sym("p", nparams)
+    args = np.zeros(shape = (nexpt, 1)) if args is None else args.reshape(nexpt, -1)
+    args_sym = cd.MX.sym("args", args.shape[-1])
+
+    # Time horizon
+    dt = time_span[1] - time_span[0] # Equally spaced
+    N = nint * (len(time_span) - 1) # number of intervals
+    h = dt / nint
+
+    # Continuous time dynamics
+    f = cd.Function('f', [x_sym, args_sym, p_sym], [h * dynamics(x_sym, 0, (p_sym, args_sym))], ['x', 'args', 'p'], ['xdot'])
+    
+    # Start with an empty NLP
+    p_var = opti.variable(nparams)
+
+    # Formulate the NLP for all finite elements
+    x_var = opti.variable(nstates * nexpt, N * (d + 1)) # can only initialize matrix, not tensors
+    xk_end = cd.MX(xinit.flatten()) # Given initial conditions
+    x_aux = []
+    cost = 0
+
+    for k in range(N):
+        
+        # states at collocation points
+        xk = x_var[:, k * (d + 1) : (k + 1) * (d + 1)]
+
+        # Add equality constraint
+        opti.subject_to(cd.vec(xk[:, 0] - xk_end) == 0)
+
+        # Expression for the state derivative at the collocation point
+        xp = cd.mtimes(xk, cd.MX(C[:, 1:]))
+
+        # Dynamic equation constraint at the collocation point
+        # split -> map -> concat
+        opti.subject_to(
+            cd.vec(cd.vertcat(
+                *map(
+                    lambda z : f(*z, p_var), zip(cd.vertsplit(xk[:, 1:], list(range(0, nstates * (nexpt + 1), nstates))), args)
+                )
+            ) - xp) == 0
+        )
+
+        # Expression for the end state
+        xk_end = cd.mtimes(xk, cd.MX(D))
+
+        # add objective function
+        if k % nint == 0 : cost += cd.sumsqr(xk[:, 0] - solution[k // nint])
+
+    opti.minimize(cost / np.prod(solution.shape))
+    opti.set_initial(cd.reshape(x_var, 1, -1), np.repeat(solution[:-1].T, nint * (d + 1), axis = 1).flatten())
+
+    # Dont solve the optimization problem. There might be other problem specific instances such as constraints. 
+    return opti, p_var
