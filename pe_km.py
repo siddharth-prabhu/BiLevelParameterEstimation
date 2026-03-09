@@ -163,7 +163,7 @@ def simple_objective_shooting(f, g, p, states, target):
     # target shape = (nexpt, T, nx) no of experiments, time points, states. Target values for inner optimization
     # p shape = (nx * F, ) # no of nonlinear decision variables
     (x_opt, v_opt), _ = differentiable_optimization(f, g, p, x_guess, (target, ))
-    _loss = f(p, x_opt, target) @ v_opt @ g(p, x_opt)
+    _loss = f(p, x_opt, target) + v_opt @ g(p, x_opt)
     return _loss, x_opt
 
 def outer_objective_shooting(p_guess, solution, target):
@@ -193,7 +193,14 @@ def outer_objective_shooting(p_guess, solution, target):
         jac = _simple_jac,
         hess = _simple_hess,  
         tol = pargs.tol, 
-        options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
+        options = {
+            "maxiter" : pargs.iters, 
+            "output_file" : _output_file, 
+            "disp" : 0, 
+            "file_print_level" : 5, 
+            "print_timing_statistics" : "yes",
+            "mu_strategy" : "adaptive"
+            }
         )
         
     shooting_logger.info(f"{divider}")
@@ -212,7 +219,7 @@ def outer_objective_shooting(p_guess, solution, target):
 
 if pargs.method == 0 : 
     p, x = outer_objective_shooting(p_guess, solution, dfsindy_target)
-    plot_coefficients([*p_actual], [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir)
+    plot_coefficients([*p_actual], [x, p], param_labels, "BiLevelShootingInterpCoeff", _dir, separate = False)
     prediction = ddeint(km, lambda t : xinit, time_span, fargs = ((x, p), ))
     plot_trajectories(solution, prediction, time_span, 3, "BiLevelShootingInterpStates", _dir)
 
@@ -251,7 +258,14 @@ def outer_objective(px_guess, target):
         jac = _simple_jac,
         hess = _simple_hess,  
         tol = pargs.tol, 
-        options = {"maxiter" : pargs.iters, "output_file" : _output_file, "disp" : 0, "file_print_level" : 5, "mu_strategy" : "adaptive"}
+        options = {
+            "maxiter" : pargs.iters, 
+            "output_file" : _output_file, 
+            "disp" : 0, 
+            "file_print_level" : 5, 
+            "print_timing_statistics" : "yes",
+            "mu_strategy" : "adaptive"
+            }
         )
         
     interp_logger.info(f"{divider}")
